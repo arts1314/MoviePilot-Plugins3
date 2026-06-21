@@ -98,6 +98,26 @@ class UIConfig:
                              }]}
                         ]
                     },
+                    # 屏蔽系统订阅 + PT/115 时间窗口说明（仿原 8h VAlert 写法）- 2026-06-21 加
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol',
+                            'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
+                                    'text': 'PT/115 时间窗口:每天 18:00~23:59 屏蔽系统订阅(只走 115 网盘订阅追更),'
+                                            '00:00 自动恢复 PT 订阅(便于白天手动下 PT 资源),18:00 重新屏蔽。'
+                                            '具体触发:23:00 最后一次 cron 跑完 + unblock_delay_minutes 延迟(默认 60 分钟)→ 00:00 恢复 PT,'
+                                            '持续 unblock_window_hours 小时(默认 18)→ 18:00 重新屏蔽。'
+                                            'unblock_site_names 为空将禁用窗口(始终屏蔽),必须填具体 PT 站名。'
+                                }
+                            }]
+                        }]
+                    },
 
                     # 取消屏蔽后的站点选择/窗口期/延迟分钟（1.2.4 语义同步）
                     {
@@ -429,7 +449,6 @@ class UIConfig:
                                     'variant': 'tonal',
                                     'text': '防杜比视界（DoVi / Dolby Vision / 杜比视界）转存:命中文件名即硬拒绝,任何模式下都不放行。'
                                             '当前生效规则（可在上方输入框修改留空回退默认）:DoVi|Dolby[\\s.]?Vision|DOVI|杜比视界。'
-                                            'HDR 片源请从 PT 站下载,不依赖 115 网盘。'
                                 }
                             }]
                         }]
