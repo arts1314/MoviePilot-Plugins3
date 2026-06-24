@@ -98,83 +98,8 @@ class UIConfig:
                              }]}
                         ]
                     },
-                    # 屏蔽系统订阅 + PT/115 时间窗口说明（仿原 8h VAlert 写法）- 2026-06-21 加
-                    {
-                        'component': 'VRow',
-                        'content': [{
-                            'component': 'VCol',
-                            'props': {'cols': 12},
-                            'content': [{
-                                'component': 'VAlert',
-                                'props': {
-                                    'type': 'info',
-                                    'variant': 'tonal',
-                                    'text': 'PT/115 时间窗口:每天 18:00~23:59 屏蔽系统订阅(只走 115 网盘订阅追更),'
-                                            '00:00 自动恢复 PT 订阅(便于白天手动下 PT 资源),18:00 重新屏蔽。'
-                                            '具体触发:23:00 最后一次 cron 跑完 + unblock_delay_minutes 延迟(默认 60 分钟)→ 00:00 恢复 PT,'
-                                            '持续 unblock_window_hours 小时(默认 18)→ 18:00 重新屏蔽。'
-                                            'unblock_site_names 为空将禁用窗口(始终屏蔽),必须填具体 PT 站名。'
-                                }
-                            }]
-                        }]
-                    },
 
-                    # 取消屏蔽后的站点选择/窗口期/延迟分钟（1.2.4 语义同步）
-                    {
-                        'component': 'VRow',
-                        'content': [
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 6},
-                                'content': [{
-                                    'component': 'VSelect',
-                                    'props': {
-                                        'model': 'unblock_site_names',
-                                        'label': '取消屏蔽后订阅站点选择（多选）',
-                                        'items': site_name_items,
-                                        'multiple': True,
-                                        'chips': True,
-                                        'clearable': True,
-                                        'closable-chips': True,
-                                        'hint': '为空表示禁用窗口：始终保持屏蔽（仅115网盘）',
-                                        'persistent-hint': True
-                                    }
-                                }]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {
-                                        'model': 'unblock_window_hours',
-                                        'label': '取消屏蔽窗口期（小时）',
-                                        'type': 'number',
-                                        'placeholder': '2',
-                                        'hint': '设为0表示禁用窗口：始终保持屏蔽（仅115网盘）',
-                                        'persistent-hint': True,
-                                        'clearable': True
-                                    }
-                                }]
-                            },
-                            {
-                                'component': 'VCol',
-                                'props': {'cols': 12, 'md': 3},
-                                'content': [{
-                                    'component': 'VTextField',
-                                    'props': {
-                                        'model': 'unblock_delay_minutes',
-                                        'label': '每天最后一次任务后延迟（分钟）',
-                                        'type': 'number',
-                                        'placeholder': '5',
-                                        'hint': '设为-1表示禁用窗口：始终保持屏蔽（仅115网盘）；否则23:00兜底恢复系统订阅',
-                                        'persistent-hint': True,
-                                        'clearable': True
-                                    }
-                                }]
-                            }
-                        ]
-                    },
+
 
                     # 115网盘说明
                     {
@@ -217,14 +142,13 @@ class UIConfig:
                                     'label': '搜索源优先级（按选择顺序排序）',
                                     'items': [
                                         {'title': 'PanSou (盘搜)', 'value': 'pansou'},
-                                        {'title': 'HDHive (影巢)', 'value': 'hdhive'},
-                                        {'title': 'Nullbr', 'value': 'nullbr'}
+                                        {'title': 'HDHive (影巢)', 'value': 'hdhive'}
                                     ],
                                     'multiple': True,
                                     'chips': True,
                                     'clearable': True,
                                     'closable-chips': True,
-                                    'hint': '按选择的先后顺序依次搜索，前面的源搜到结果就不再查询后面的；留空使用默认优先级 Nullbr > HDHive > PanSou；未选入的已启用源会自动排在末尾',
+                                    'hint': '按选择的先后顺序依次搜索，前面的源搜到结果就不再查询后面的；留空使用默认优先级 HDHive > PanSou；未选入的已启用源会自动排在末尾',
                                     'persistent-hint': True
                                 }
                             }]
@@ -448,10 +372,119 @@ class UIConfig:
                                     'type': 'info',
                                     'variant': 'tonal',
                                     'text': '防杜比视界（DoVi / Dolby Vision / 杜比视界）转存:命中文件名即硬拒绝,任何模式下都不放行。'
-                                            '当前生效规则（可在上方输入框修改留空回退默认）:DoVi|Dolby[\\s.]?Vision|DOVI|杜比视界。'
+                                            '当前生效规则（可在上方输入框修改留空回退默认）:DoVi|Dolby[\\\\s.]?Vision|DOVI|杜比视界。'
+                                            'HDR 片源请从 PT 站下载,不依赖 115 网盘。'
                                 }
                             }]
                         }]
+                    },
+                    # 洗版配置说明
+                    {
+                        'component': 'VRow',
+                        'content': [{
+                            'component': 'VCol',
+                            'props': {'cols': 12},
+                            'content': [{
+                                'component': 'VAlert',
+                                'props': {
+                                    'type': 'info',
+                                    'variant': 'tonal',
+                                    'density': 'compact',
+                                    'text': '洗版模式：发现更高画质时自动替换。评分依据文件名中的视频格式/HDR/编码等信息（即MP订阅规则评分结果），非文件大小。'
+                                            '匹配第1条规则→100分，末条→60分，中间等差插值。新旧比对时分数更高的自动替换。'
+                                }
+                            }]
+                        }]
+                    },
+                    # 洗版开关：网盘洗版 / PT洗版
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {
+                                 'model': 'enable_cloud_upgrade', 'label': '网盘洗版',
+                                 'hint': '115转存后自动扫本地strm，与episode_priority比对评分。发现更高分版本且层级差足够时，删除115网盘旧文件（回收站）并保留新高分文件。',
+                                 'persistent-hint': True
+                             }}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {
+                                 'model': 'enable_pt_upgrade', 'label': 'PT洗版',
+                                 'hint': 'PT下载后自动扫本地strm并与episode_priority比对。评分机制：匹配第1条优先级规则→100分，末条→60分，中间等差。旧文件→回收站，转存新文件。配套需安装「订阅规则自动填充」插件并配置过滤组。',
+                                 'persistent-hint': True
+                             }}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
+                             'content': [{'component': 'VSwitch', 'props': {
+                                 'model': 'auto_best_version', 'label': '自动开启原生洗版',
+                                 'hint': '（PT洗版子开关）打开后自动将所有电视剧订阅的best_version置为开启，无需逐个手动打开。关闭时仅已手动开启的订阅生效。',
+                                 'persistent-hint': True
+                             }}]},
+                        ]
+                    },
+                    # 网盘洗版目录映射
+                    # 第一行：电视剧
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {
+                                 'model': 'cloud_tv_local_dir', 'label': '本地strm电视剧',
+                                 'placeholder': '/media/电视剧',
+                                 'hint': '与115网盘目录层级结构保持一致可免API搜索，否则需开启下方删除开关并触发API',
+                                 'persistent-hint': True, 'clearable': True
+                             }}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {
+                                 'model': 'cloud_tv_remote_dir', 'label': '网盘电视剧',
+                                 'placeholder': '/视频',
+                                 'hint': '与本地strm目录层级一致可免搜索，不一致开启删除开关后增加请求可能触发风控',
+                                 'persistent-hint': True, 'clearable': True
+                             }}]},
+                        ]
+                    },
+                    # 第二行：电影
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {
+                                 'model': 'cloud_movie_local_dir', 'label': '本地strm电影',
+                                 'placeholder': '/media/电影',
+                                 'hint': '与115网盘目录层级结构保持一致可免API搜索，否则需开启下方删除开关并触发API',
+                                 'persistent-hint': True, 'clearable': True
+                             }}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {
+                                 'model': 'cloud_movie_remote_dir', 'label': '网盘电影',
+                                 'placeholder': '/电影',
+                                 'hint': '与本地strm目录层级一致可免搜索，不一致开启删除开关后增加请求可能触发风控',
+                                 'persistent-hint': True, 'clearable': True
+                             }}]},
+                        ]
+                    },
+                    # 洗版参数
+                    {
+                        'component': 'VRow',
+                        'content': [
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VSelect', 'props': {
+                                 'model': 'min_upgrade_tiers', 'label': '最小洗版层级差',
+                                 'items': [
+                                     {'title': '1级 (任何提升即触发)', 'value': 1},
+                                     {'title': '2级 (默认)', 'value': 2},
+                                     {'title': '3级', 'value': 3},
+                                     {'title': '4级', 'value': 4},
+                                     {'title': '5级 (仅巨大提升触发)', 'value': 5},
+                                 ],
+                                 'hint': '新版本超过旧版本至少N个过滤规则层级才触发删除。1级最激进，5级最保守。',
+                                 'persistent-hint': True, 'clearable': True
+                             }}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                             'content': [{'component': 'VTextField', 'props': {
+                                 'model': 'self_heal_interval', 'label': '进度自愈间隔（分钟）', 'type': 'number',
+                                 'placeholder': '10', 'hint': '自动清理episode_priority中本地strm已不存在的记录。设为0关闭自愈。',
+                                 'persistent-hint': True, 'clearable': True, 'min': 0, 'max': 60
+                             }}]},
+                        ]
                     }
                 ]
             }
@@ -464,11 +497,6 @@ class UIConfig:
             "only_115": True,
             "cron": "30 2,10,18 * * *",
 
-            "unblock_site_ids": [],
-            "unblock_site_names": [],
-            "unblock_window_hours": 1,
-            "system_subscribe_window_hours": 1,
-            "unblock_delay_minutes": 5,
 
             "save_path": "/我的接收/MoviePilot/TV",
             "movie_save_path": "/我的接收/MoviePilot/Movie",
@@ -504,9 +532,21 @@ class UIConfig:
             "exclude_subscribes": [],
             "include_subscribes": [],
             "block_system_subscribe": False,
+            "auto_best_version": False,
+            "unblock_start_time": "17:30",
+            "unblock_end_time": "23:59",
             "max_transfer_per_sync": 50,
             "batch_size": 20,
-            "skip_other_season_dirs": True
+            "skip_other_season_dirs": True,
+            "enable_cloud_upgrade": False,
+            "enable_pt_upgrade": False,
+            "auto_best_version": False,
+            "cloud_tv_local_dir": "",
+            "cloud_tv_remote_dir": "",
+            "cloud_movie_local_dir": "",
+            "cloud_movie_remote_dir": "",
+            "min_upgrade_tiers": 2,
+            "self_heal_interval": 10
         }
 
         return form_schema, default_config
