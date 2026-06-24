@@ -10,6 +10,10 @@
 | 最小调度间隔 | 强制 ≥ 8 小时 | 无限制 |
 | DoVi 兜底排除 | ❌ 无 | ✅ `DoVi\|Dolby[\s.]?Vision\|DOVI\|杜比视界`（默认兜底，可在 UI 调） |
 | 同步触发频率 | 每天 3 次 | 每晚 6 次（18:00 / 19:00 / 20:00 / 21:00 / 22:00 / 23:00） |
+| **网盘洗版** | ❌ 无 | ✅ 115 转存后自动扫描，发现更高画质删除旧文件（回收站） |
+| **PT洗版** | ❌ 无 | ✅ PT 下载后自动对比评分，低分文件联动删除 |
+| **自动开启原生洗版** | ❌ 无 | ✅ 一键开启所有订阅的 best_version，MP 自动搜索更好资源 |
+| **屏蔽时段调度** | ❌ 无 | ✅ 支持跨天时段（如 22:00~06:00），灵活切换仅115/混合模式 |
 
 ## 📦 安装
 
@@ -28,7 +32,7 @@ PLUGIN_MARKET='<你原有的仓地址>,https://github.com/jinyuhao-886/MoviePilo
 界面会显示：
 
 - **名字**：115网盘订阅追更魔改版
-- **版本**：1.5.3-modi.2
+- **版本**：1.5.3-modi.4
 - **作者**：jinyuhao-886
 
 ## ⚙️ 配置项
@@ -51,7 +55,27 @@ PLUGIN_MARKET='<你原有的仓地址>,https://github.com/jinyuhao-886/MoviePilo
 | `block_system_subscribe` | 是否屏蔽系统订阅，只走 115 网盘（默认 True） |
 | `global_exclude` | 全局兜底 exclude 正则（默认 `DoVi\|Dolby[\s.]?Vision\|DOVI\|杜比视界`） |
 | `hdhive_*` | HDHive 资源站配置，不用就 disabled |
-| `nullbr_*` | NullBr 资源站配置，不用就 disabled |
+
+### 🔄 洗版模式（v1.5.3-modi.4 新增）
+
+| 字段 | 说明 |
+|---|---|
+| `enable_cloud_upgrade` | 网盘洗版开关：115转存后自动对比评分，旧文件→回收站 |
+| `enable_pt_upgrade` | PT洗版开关：PT下载后自动打分，低分版本联动删除 |
+| `auto_best_version` | 原生洗版总开关：一键开启所有订阅 best_version |
+| `cloud_tv_local_dir` | 本地 strm 电视剧根目录（用于洗版路径映射） |
+| `cloud_tv_remote_dir` | 115 网盘电视剧目录（用于洗版删除旧文件） |
+| `min_upgrade_tiers` | 最小洗版层级差（1~5级，默认2级，避免微调就重下） |
+| `self_heal_interval` | 进度自愈间隔（分钟），自动清理已不存在的episode_priority |
+
+### ⏰ 屏蔽时段调度
+
+| 字段 | 说明 |
+|---|---|
+| `unblock_start_time` | 取消屏蔽开始时间（如 17:30），此时间后订阅恢复用户原始选择 |
+| `unblock_end_time` | 取消屏蔽结束时间（如 23:59），此时间后重设仅115网盘 |
+
+支持跨天时段（如 22:00~06:00），配合 `block_system_subscribe` 开关灵活切换。
 
 ### 🍪 `cookies` 怎么拿？
 
@@ -75,9 +99,24 @@ PLUGIN_MARKET='<你原有的仓地址>,https://github.com/jinyuhao-886/MoviePilo
 
 插件市场 → 搜索「115网盘订阅追更魔改版」→ 看到新版本点升级即可。
 
-⚠️ **升级不会丢配置**：本插件的 `plugin_id` 仍为 `P115StrgmSub`，所有 `user.db` 配置（48 字段）无缝迁移。
+⚠️ **升级不会丢配置**：本插件的 `plugin_id` 仍为 `P115StrgmSub`，所有 `user.db` 配置（50+ 字段）无缝迁移。
 
 ## 📊 版本历史
+
+### v1.5.3-modi.4 (2026-06-25)
+
+- **完整洗版模式**：网盘洗版 + PT洗版双模式
+  - 支持 `auto_upgrade_scan` 自动扫描多版本，保留最高分
+  - 联动删除 115 网盘旧文件（进回收站，非永久删除）
+  - 层级差阈值（1~5级），避免画质微调就重下一遍
+- **屏蔽时段调度**：跨天时段支持（如 22:00~06:00）
+- **进度自愈**：自动清理已不存在的 episode_priority 记录
+- 移除 Nullbr 搜索源
+
+### v1.5.3-modi.3 (2026-06-23)
+
+- UI 调整：PT/115 窗口时段配置
+- 洗版模式基础实现
 
 ### v1.5.3-modi.2 (2026-06-21)
 
