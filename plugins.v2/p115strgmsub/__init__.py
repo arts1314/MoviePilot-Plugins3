@@ -10,6 +10,7 @@ from typing import Optional, Any, List, Dict, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
 from app.core.config import settings, global_vars
@@ -299,6 +300,7 @@ class P115StrgmSub(_PluginBase):
         备份所有订阅的原始站点并强制设为仅115网盘。
         - 备份数据通过 save_data 持久化，跨重启不丢失
         - 仅首次进入接管态时备份（_is_blocked=False），不重复覆盖
+        - 额外检查：如果订阅已经是 [-1] 说明已在屏蔽态，不重复备份
         """
         self._init_subscribe_handler()
         tz = pytz.timezone(settings.TZ)
@@ -306,6 +308,7 @@ class P115StrgmSub(_PluginBase):
 
         # 备份当前所有非-1订阅的站点（已屏蔽的不重复备份）
         if not self._is_blocked:
+            already_blocked = True
             backup = {}
             with SessionFactory() as db:
                 from app.db.subscribe_oper import SubscribeOper
@@ -315,10 +318,16 @@ class P115StrgmSub(_PluginBase):
                         try:
                             sites = getattr(s, "sites", None)
                             if sites is not None:
+                                # 如果任意订阅的 sites 不是 [-1]，说明不在屏蔽态
+                                if sites != [-1]:
+                                    already_blocked = False
                                 backup[str(s.id)] = sites
                         except Exception:
                             pass
-            if backup:
+            # 如果所有订阅已经是 [-1]，说明已经是屏蔽态，不覆盖备份
+            if already_blocked:
+                logger.info(f"订阅已是屏蔽态（sites=[-1]），跳过重复备份")
+            elif backup:
                 self.save_data("subscribe_sites_backup", backup)
                 logger.info(f"订阅站点备份：已保存 {len(backup)} 个订阅的原始站点")
 
@@ -931,6 +940,15 @@ class P115StrgmSub(_PluginBase):
                 "func": self.sync_subscribes,
                 "kwargs": {}
             })
+
+        # 接管态定时检查器：每5分钟检查一次订阅站点是否与当前时段匹配
+        services.append({
+            "id": "P115StrgmSub_BlockCheck",
+            "name": "接管态定时检查",
+            "trigger": IntervalTrigger(minutes=5),
+            "func": self._apply_block_by_time,
+            "kwargs": {}
+        })
 
         return services
 
