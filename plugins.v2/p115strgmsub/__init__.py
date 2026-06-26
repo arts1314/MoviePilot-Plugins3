@@ -10,6 +10,7 @@ from typing import Optional, Any, List, Dict, Tuple
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import text
 
 from app.core.config import settings, global_vars
@@ -39,7 +40,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.5.3-modi.4"
+    plugin_version = "1.5.3-modi.5"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -112,6 +113,7 @@ class P115StrgmSub(_PluginBase):
 
     # 洗版配置
     _auto_best_version: bool = False
+    _upgrade_subscribe_ids: list = []
     _min_upgrade_tiers: int = 2
     _self_heal_interval: int = 10  # 分钟
     _enable_cloud_upgrade: bool = False
@@ -120,9 +122,15 @@ class P115StrgmSub(_PluginBase):
     _cloud_tv_remote_dir: str = ""  # 115网盘电视剧目录（网盘洗版用）
     _cloud_movie_local_dir: str = ""  # 本地电影strm根目录（网盘洗版用）
     _cloud_movie_remote_dir: str = ""  # 115网盘电影目录（网盘洗版用）
-    # 取消屏蔽时间段（仅当 block_system_subscribe=OFF 时生效）
-    _unblock_start_time: str = "17:30"
-    _unblock_end_time: str = "23:59"
+    # 帧率/比特率洗版评分规则
+    _frame_rate_pattern: str = r"60fps|120fps"
+    _bit_rate_pattern: str = r"TrueHD|DTS-HD|DTS5\\.1|ATMOS|LPCM|FLAC"
+    # 屏蔽态时间段（block_system_subscribe=OFF 时生效，屏蔽态内保持[-1]不变）
+    _block_start_time: str = "18:00"
+    _block_end_time: str = "23:59"
+    # 开放态时间段（block_system_subscribe=OFF 时生效，开放态内自动恢复用户站点）
+    _unblock_start_time: str = "00:00"
+    _unblock_end_time: str = "17:30"
     # 当前是否处于接管态（True=强制仅115，False=用户原始站点）
     _is_blocked: bool = False
 
@@ -325,7 +333,6 @@ class P115StrgmSub(_PluginBase):
         # 强制设为仅115
         self._subscribe_handler.set_blocked_sites_only_115()
         self._is_blocked = True
-        self._block_system_subscribe = True
         self.__update_config()
         logger.info(f"已接管系统订阅（仅115网盘）：{reason or '时间到达接管时段'}")
 
@@ -342,7 +349,6 @@ class P115StrgmSub(_PluginBase):
             logger.warning("订阅站点备份为空，无法恢复原始站点")
             # 即使无备份也要切回非接管态，恢复为无限制（所有站点可用）
             self._is_blocked = False
-            self._block_system_subscribe = False
             with SessionFactory() as db:
                 from app.db.subscribe_oper import SubscribeOper
                 oper = SubscribeOper(db=db)
@@ -383,7 +389,6 @@ class P115StrgmSub(_PluginBase):
             logger.warning("订阅站点备份已被污染（全为[-1]），清除备份并使用默认站点")
             self.del_data("subscribe_sites_backup")
             self._is_blocked = False
-            self._block_system_subscribe = False
             with SessionFactory() as db:
                 from app.db.subscribe_oper import SubscribeOper
                 oper = SubscribeOper(db=db)
@@ -432,9 +437,31 @@ class P115StrgmSub(_PluginBase):
 
         self.del_data("subscribe_sites_backup")
         self._is_blocked = False
-        self._block_system_subscribe = False
         self.__update_config()
         logger.info(f"已退出接管：恢复 {restored} 个订阅的原始站点（{reason or '时间到达接管结束'}）")
+
+    def _is_time_in_block(self, time_str: str = None) -> bool:
+        """
+        判断指定时间（或当前时间）是否在屏蔽时间段内。
+        仅在 block_system_subscribe=OFF 时生效。
+        支持跨天时段（如 22:00 ~ 06:00）。
+        """
+        if self._block_system_subscribe:
+            return False
+        if not self._block_start_time or not self._block_end_time:
+            return False
+
+        tz = pytz.timezone(settings.TZ)
+        now = datetime.datetime.now(tz=tz).strftime("%H:%M")
+        check = time_str or now
+
+        b_start = self._block_start_time.strip()
+        b_end = self._block_end_time.strip()
+
+        if b_start < b_end:
+            return b_start <= check <= b_end
+        else:
+            return check >= b_start or check <= b_end
 
     def _apply_block_by_time(self):
         """
@@ -442,10 +469,11 @@ class P115StrgmSub(_PluginBase):
         由 sync_subscribes 和 init_plugin 调用。
 
         规则：
-        - 屏蔽系统订阅 = 开启 → 始终接管（115网盘接管模式）
-        - 屏蔽系统订阅 = 关闭 → 按取消屏蔽时间段：
-          - 在取消屏蔽时段内 → 恢复用户原始站点
-          - 不在取消屏蔽时段内 → 强制仅115网盘
+        - 屏蔽系统订阅 = 开启 → 始终接管（无视时间）
+        - 屏蔽系统订阅 = 关闭 → 判定当前时间：
+          - 开放态（unblock时段）→ 恢复用户配置的原始站点
+          - 屏蔽态（block时段）→ 接管为仅 115 网盘
+          - 都不在（缓冲时段）→ 保持现有状态不变
         """
         if self._block_system_subscribe:
             # 屏蔽开启 → 始终接管
@@ -454,17 +482,63 @@ class P115StrgmSub(_PluginBase):
             else:
                 logger.debug("屏蔽开启：已在接管态")
         else:
-            # 屏蔽关闭 → 按取消屏蔽时间段判断
+            # 屏蔽关闭 → 按时间段判断
             if self._is_time_in_unblock():
+                # 开放态 → 恢复用户站点
                 if self._is_blocked:
-                    self._restore_and_exit_blocked(reason="进入取消屏蔽时段")
+                    self._restore_and_exit_blocked(reason="进入开放时段")
                 else:
-                    logger.debug("取消屏蔽时段内：已处于非接管态")
+                    # 检查数据库是否还有 [-1] 残留（插件重启后 _is_blocked 重置导致）
+                    _still_blocked = False
+                    with SessionFactory() as _db:
+                        from app.db.subscribe_oper import SubscribeOper
+                        for _s in (SubscribeOper(db=_db).list() or []):
+                            if not self._is_subscribe_excluded(_s.id) and str(getattr(_s, "sites", "[]")) == "[-1]":
+                                _still_blocked = True
+                                break
+                    if _still_blocked:
+                        logger.info("数据库仍有 [-1] 残留，强制恢复（开放时段）")
+                        self._restore_and_exit_blocked(reason="数据库残留恢复（开放时段）")
+                    else:
+                        logger.debug("开放时段内：已处于非接管态")
             else:
-                if not self._is_blocked:
-                    self._backup_and_enter_blocked(reason="非取消屏蔽时段")
+                # 非开放态 → 判断是否在屏蔽时段
+                if self._is_time_in_block():
+                    # 屏蔽态 → 主动接管为仅115
+                    if not self._is_blocked:
+                        self._backup_and_enter_blocked(reason="进入屏蔽时段")
+                    else:
+                        logger.debug("屏蔽时段：已在接管态")
                 else:
-                    logger.debug("非取消屏蔽时段：已在接管态")
+                    # 都不在（缓冲期 17:30~18:00）→ 保持现有状态不变
+                    logger.debug("当前不在任何管控时段，保持现有状态不变")
+
+    def _apply_best_version_selected(self):
+        """
+        根据 _upgrade_subscribe_ids 列表，给指定的订阅开启原生洗版（best_version=1）。
+        与 _auto_best_version 独立工作，不受其影响。
+        """
+        ids = self._upgrade_subscribe_ids or []
+        if not ids:
+            logger.info("[原生洗版] 无指定洗版订阅，跳过")
+            return
+        with SessionFactory() as db:
+            from app.db.subscribe_oper import SubscribeOper
+            oper = SubscribeOper(db=db)
+            updated = 0
+            for sid in ids:
+                try:
+                    sub = oper.get(sid)
+                    if not sub:
+                        continue
+                    current = bool(getattr(sub, "best_version", False))
+                    if not current:
+                        oper.update(sid, {"best_version": 1})
+                        updated += 1
+                except Exception as e:
+                    logger.warning(f"[原生洗版] 更新订阅 {sid} 洗版失败：{e}")
+            if updated:
+                logger.info(f"[原生洗版] 已为 {updated} 个指定订阅开启洗版")
 
     def _apply_best_version_all(self):
         """根据 _auto_best_version 开关，批量开启/关闭所有电视剧订阅的 best_version"""
@@ -623,6 +697,7 @@ class P115StrgmSub(_PluginBase):
 
             # 洗版配置
             self._auto_best_version = bool(config.get("auto_best_version", False))
+            self._upgrade_subscribe_ids = config.get("upgrade_subscribe_ids", []) or []
             self._min_upgrade_tiers = int(config.get("min_upgrade_tiers", 2))
             self._self_heal_interval = int(config.get("self_heal_interval", 10))
             self._enable_cloud_upgrade = bool(config.get("enable_cloud_upgrade", False))
@@ -631,8 +706,17 @@ class P115StrgmSub(_PluginBase):
             self._cloud_tv_remote_dir = str(config.get("cloud_tv_remote_dir", "") or "")
             self._cloud_movie_local_dir = str(config.get("cloud_movie_local_dir", "") or "")
             self._cloud_movie_remote_dir = str(config.get("cloud_movie_remote_dir", "") or "")
+            # 帧率/比特率评分规则
+            _fp = config.get("frame_rate_pattern", None)
+            if _fp:
+                self._frame_rate_pattern = str(_fp)
+            _bp = config.get("bit_rate_pattern", None)
+            if _bp:
+                self._bit_rate_pattern = str(_bp)
 
             # 取消屏蔽时间段配置
+            self._block_start_time = str(config.get("block_start_time", self._block_start_time) or self._block_start_time)
+            self._block_end_time = str(config.get("block_end_time", self._block_end_time) or self._block_end_time)
             self._unblock_start_time = str(config.get("unblock_start_time", self._unblock_start_time) or self._unblock_start_time)
             self._unblock_end_time = str(config.get("unblock_end_time", self._unblock_end_time) or self._unblock_end_time)
 
@@ -645,7 +729,8 @@ class P115StrgmSub(_PluginBase):
         # 配置立即生效：根据当前时间检查接管态
         self._apply_block_by_time()
         self._apply_best_version_all()
-        logger.info(f"插件初始化：取消屏蔽时段={self._unblock_start_time}~{self._unblock_end_time}, 洗版={'开启' if self._auto_best_version else '关闭'}, 当前接管态={self._is_blocked}")
+        self._apply_best_version_selected()
+        logger.info(f"插件初始化：屏蔽态={self._block_start_time}~{self._block_end_time}, 开放态={self._unblock_start_time}~{self._unblock_end_time}, 洗版={'开启' if self._auto_best_version else '关闭'}, 当前接管态={self._is_blocked}")
 
         # 立即运行一次
         if self._enabled or self._onlyonce:
@@ -825,7 +910,9 @@ class P115StrgmSub(_PluginBase):
             cloud_tv_local_dir=self._cloud_tv_local_dir,
             cloud_tv_remote_dir=self._cloud_tv_remote_dir,
             cloud_movie_local_dir=self._cloud_movie_local_dir,
-            cloud_movie_remote_dir=self._cloud_movie_remote_dir
+            cloud_movie_remote_dir=self._cloud_movie_remote_dir,
+            frame_rate_pattern=self._frame_rate_pattern,
+            bit_rate_pattern=self._bit_rate_pattern
         )
 
         self._api_handler = ApiHandler(
@@ -883,9 +970,10 @@ class P115StrgmSub(_PluginBase):
             "include_subscribes": self._include_subscribes,
             "global_exclude": self._global_exclude,
             "block_system_subscribe": self._block_system_subscribe,
-            "block_start_time": self._unblock_start_time,
-            "block_end_time": self._unblock_end_time,
+            "block_start_time": self._block_start_time,
+            "block_end_time": self._block_end_time,
             "auto_best_version": self._auto_best_version,
+            "upgrade_subscribe_ids": self._upgrade_subscribe_ids,
             "unblock_start_time": self._unblock_start_time,
             "unblock_end_time": self._unblock_end_time,
             "max_transfer_per_sync": self._max_transfer_per_sync,
@@ -899,6 +987,8 @@ class P115StrgmSub(_PluginBase):
             "cloud_movie_remote_dir": self._cloud_movie_remote_dir,
             "min_upgrade_tiers": self._min_upgrade_tiers,
             "self_heal_interval": self._self_heal_interval,
+            "frame_rate_pattern": self._frame_rate_pattern,
+            "bit_rate_pattern": self._bit_rate_pattern,
         })
 
     # ------------------ stop ------------------
@@ -998,6 +1088,15 @@ class P115StrgmSub(_PluginBase):
                 "func": self.sync_subscribes,
                 "kwargs": {}
             })
+
+        # 5分钟定时检查：自动处理开放态/屏蔽态切换
+        services.append({
+            "id": "P115StrgmSub_BlockCheck",
+            "name": "115网盘接管定时检查（5分钟）",
+            "trigger": IntervalTrigger(seconds=300),
+            "func": self._apply_block_by_time,
+            "kwargs": {}
+        })
 
         return services
 
