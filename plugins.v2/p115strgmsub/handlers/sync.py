@@ -53,7 +53,9 @@ class SyncHandler:
         cloud_tv_local_dir: str = "",
         cloud_tv_remote_dir: str = "",
         cloud_movie_local_dir: str = "",
-        cloud_movie_remote_dir: str = ""
+        cloud_movie_remote_dir: str = "",
+        frame_rate_pattern: str = r"60fps|120fps",
+        bit_rate_pattern: str = r"TrueHD|DTS-HD|DTS5\.1|ATMOS|LPCM|FLAC"
     ):
         """
         初始化同步处理器
@@ -371,6 +373,16 @@ class SyncHandler:
         :return: 更新后的转存数量
         """
         try:
+            # 洗版模式派发到独立转存逻辑
+            if bool(subscribe.best_version):
+                return self._process_tv_subscribe_upgrade(
+                    subscribe=subscribe,
+                    history=history,
+                    transfer_details=transfer_details,
+                    transferred_count=transferred_count,
+                    exclude_ids=exclude_ids
+                )
+
             logger.info(f"订阅信息：{subscribe.name}，开始集数：{subscribe.start_episode}, 总集数：{subscribe.total_episode}, 缺失集数：{subscribe.lack_episode}")
             logger.info(f"处理订阅：{subscribe.name} (S{subscribe.season or 1})")
 
@@ -849,6 +861,406 @@ class SyncHandler:
 
         return transferred_count
 
+    def _process_tv_subscribe_upgrade(
+        self,
+        subscribe,
+        history: List[dict],
+        transfer_details: List[Dict[str, Any]],
+        transferred_count: int,
+        exclude_ids: Set[int]
+    ) -> int:
+        """
+        洗版模式专用转存逻辑（独立于普通转存）
+
+        流程：
+        1. 分析本地 strm 已有画质评分
+        2. 搜索全部集数（含已存在的）
+        3. 仅转存画质提升达到层级的集数
+        4. 不调用 check_and_finish_subscribe，保持订阅活跃
+
+        :param subscribe: 订阅对象
+        :param history: 历史记录列表
+        :param transfer_details: 转存详情列表
+        :param transferred_count: 当前已转存数量
+        :param exclude_ids: 排除的订阅ID集合
+        :return: 更新后的转存数量
+        """
+        import re
+        from pathlib import Path
+        from app.db.subscribe_oper import SubscribeOper
+
+        try:
+            season = subscribe.season or 1
+            logger.info(f"【洗版转存】{subscribe.name} S{season:02d}")
+
+            # ---- 1. 识别媒体信息 ----
+            meta = MetaInfo(subscribe.name)
+            meta.year = subscribe.year
+            meta.begin_season = season
+            meta.type = MediaType.TV
+
+            mediainfo: MediaInfo = self._chain.recognize_media(
+                meta=meta, mtype=MediaType.TV,
+                tmdbid=subscribe.tmdbid, doubanid=subscribe.doubanid, cache=True
+            )
+            if not mediainfo:
+                logger.warn(f"【洗版转存】无法识别媒体信息 {subscribe.name}")
+                return transferred_count
+
+            # ---- 2. 构建过滤条件（宽松模式） ----
+            effective_exclude = getattr(subscribe, 'exclude', None)
+            if self._global_exclude and not effective_exclude:
+                effective_exclude = self._global_exclude
+            elif self._global_exclude and effective_exclude:
+                effective_exclude = f"(?:{effective_exclude})|(?:{self._global_exclude})"
+            subscribe_filter = SubscribeFilter(
+                quality=subscribe.quality, resolution=subscribe.resolution,
+                effect=subscribe.effect, include=getattr(subscribe, 'include', None),
+                exclude=effective_exclude, filter=getattr(subscribe, 'filter', None),
+                strict=False  # 洗版模式宽松匹配
+            )
+
+            # 层级阈值 = 每条规则 100 分 × 最低提升层级数
+            tier_threshold = 100 * self._min_upgrade_tiers
+
+            # ---- 3. 扫描本地 strm 目录，获取已有画质评分 ----
+            show_name = subscribe.name
+            show_year = subscribe.year or ""
+            tmdbid = subscribe.tmdbid
+
+            # 确定本地目录路径
+            candidate_bases = []
+            sub_save = getattr(subscribe, 'save_path', None)
+            if sub_save:
+                candidate_bases.append(sub_save)
+            if self._save_path:
+                candidate_bases.append(self._save_path)
+            candidate_bases.append("/media/电视剧")
+            seen = set()
+            unique_bases = []
+            for b in candidate_bases:
+                if b and b not in seen:
+                    seen.add(b)
+                    unique_bases.append(b)
+
+            local_dir = None
+            for base in unique_bases:
+                test_dir = f"{base}/{show_name} ({show_year}) {{tmdbid={tmdbid}}}/Season {season:02d}"
+                if Path(test_dir).exists():
+                    local_dir = test_dir
+                    break
+
+            # 读取已有的 episode_priority
+            existing_ep_pri = {}
+            raw_pri = getattr(subscribe, 'episode_priority', None) or {}
+            if isinstance(raw_pri, str):
+                try:
+                    raw_pri = json.loads(raw_pri)
+                except Exception:
+                    raw_pri = {}
+            existing_ep_pri = raw_pri if isinstance(raw_pri, dict) else {}
+
+            # 扫描本地 strm 文件评分
+            local_scores = {}  # episode_num -> score
+            if local_dir and Path(local_dir).exists():
+                strm_files = list(Path(local_dir).glob("*.strm"))
+                for sf in strm_files:
+                    fname = sf.name.replace('.strm', '')
+                    ep_match = re.search(r'[Ee](\d{2,4})', fname) or re.search(r'第\s*(\d+)\s*集', fname)
+                    if not ep_match:
+                        continue
+                    episode = int(ep_match.group(1))
+
+                    # 直接用 SubscribeFilter.match 的原始分数（0~300）
+                    matched, filter_score = subscribe_filter.match(fname) if subscribe_filter.has_filters() else (True, 0)
+                    if not matched:
+                        continue
+
+                    # strict=False: 即使不匹配也通过，但分数可能是 0（无规则命中）
+                    # 对于完全没命中任何规则的，给一个基础分 50（表示存在但低质）
+                    if filter_score == 0 and subscribe_filter.has_filters():
+                        filter_score = 50
+
+                    if episode not in local_scores or filter_score > local_scores[episode]:
+                        local_scores[episode] = filter_score
+
+            # 合并 episode_priority 中的历史记录
+            for ep_key, ep_score in existing_ep_pri.items():
+                try:
+                    ep_num = int(ep_key)
+                    if ep_num not in local_scores or ep_score > local_scores[ep_num]:
+                        local_scores[ep_num] = ep_score
+                except (ValueError, TypeError):
+                    pass
+
+            upgrade_log_prefix = f"【洗版转存】{mediainfo.title} S{season:02d}"
+
+            if not local_scores:
+                logger.info(f"{upgrade_log_prefix} 本地无 strm 文件，回退到普通转存逻辑")
+                return self.process_tv_subscribe(
+                    subscribe=subscribe, history=history,
+                    transfer_details=transfer_details,
+                    transferred_count=transferred_count,
+                    exclude_ids=exclude_ids
+                )
+
+            logger.info(f"{upgrade_log_prefix} 本地已有 {len(local_scores)} 集 strm 文件，"
+                        f"阈值为 {tier_threshold} 分（_min_upgrade_tiers={self._min_upgrade_tiers}）")
+
+            # ---- 4. 构造待搜索的集数列表 ----
+            total_ep = subscribe.total_episode or 0
+            start_ep = subscribe.start_episode or 1
+            all_expected_episodes = set(range(start_ep, total_ep + 1)) if total_ep > 0 else set()
+
+            # 需要升级 = 已有评分但未满分的 + 完全缺失的
+            episodes_to_search = set()
+            for ep_num in sorted(local_scores.keys()):
+                if local_scores[ep_num] < 300:
+                    episodes_to_search.add(ep_num)
+
+            if all_expected_episodes:
+                missing_eps = sorted(all_expected_episodes - set(local_scores.keys()))
+                if missing_eps:
+                    logger.info(f"{upgrade_log_prefix} 本地缺失 {len(missing_eps)} 集：{missing_eps}，一并搜索")
+                    episodes_to_search |= set(missing_eps)
+
+            if not episodes_to_search:
+                logger.info(f"{upgrade_log_prefix} 所有集数已达满分（300），无需洗版")
+                return transferred_count
+
+            episodes_to_search = sorted(episodes_to_search)
+
+            # TMDB 播出日期过滤
+            if mediainfo.tmdb_id:
+                try:
+                    from app.chain.tmdb import TmdbChain
+                    tmdb_eps = TmdbChain().tmdb_episodes(tmdbid=mediainfo.tmdb_id, season=season)
+                    if tmdb_eps:
+                        today = datetime.date.today().isoformat()
+                        aired = {ep.episode_number for ep in tmdb_eps
+                                 if ep.air_date and ep.air_date <= today and ep.episode_number}
+                        if aired:
+                            not_aired = [ep for ep in episodes_to_search if ep not in aired]
+                            if not_aired:
+                                episodes_to_search = [ep for ep in episodes_to_search if ep in aired]
+                                logger.info(f"{upgrade_log_prefix} 跳过 {len(not_aired)} 集未播出")
+                except Exception as e:
+                    logger.warning(f"{upgrade_log_prefix} TMDB 播出日期查询失败：{e}")
+
+            if not episodes_to_search:
+                logger.info(f"{upgrade_log_prefix} 无可搜索的集数")
+                return transferred_count
+
+            logger.info(f"{upgrade_log_prefix} 待搜索 {len(episodes_to_search)} 集：{episodes_to_search}")
+
+            # ---- 5. 搜索源 + 匹配转存 ----
+            enabled_sources = self._search_handler.get_enabled_sources()
+            if not enabled_sources:
+                logger.warning(f"{upgrade_log_prefix} 没有可用的搜索源")
+                return transferred_count
+
+            show_folder = f"{mediainfo.title} ({mediainfo.year})" if mediainfo.year else mediainfo.title
+            save_dir = f"{self._save_path}/{show_folder}/Season {season}"
+
+            new_priority = dict(existing_ep_pri)
+            upgrade_downloaded = 0
+            upgrade_notices = []  # 用于通知
+
+            for source_index, source in enumerate(enabled_sources):
+                if not episodes_to_search:
+                    break
+                if transferred_count >= self._max_transfer_per_sync:
+                    logger.info(f"{upgrade_log_prefix} 已达单次同步上限 {self._max_transfer_per_sync}")
+                    break
+
+                logger.info(f"{upgrade_log_prefix} [{source.upper()}] 开始搜索")
+
+                p115_results = self._search_handler.search_single_source(
+                    source=source, mediainfo=mediainfo,
+                    media_type=MediaType.TV, season=season
+                )
+
+                if not p115_results:
+                    remaining = enabled_sources[source_index + 1:]
+                    if remaining:
+                        logger.info(f"{upgrade_log_prefix} [{source.upper()}] 未找到资源，继续下一个源")
+                    else:
+                        logger.info(f"{upgrade_log_prefix} [{source.upper()}] 未找到资源，已无更多源")
+                    continue
+
+                for resource in p115_results:
+                    if not episodes_to_search:
+                        break
+                    if transferred_count >= self._max_transfer_per_sync:
+                        break
+
+                    share_url = resource.get("url", "")
+                    resource_title = resource.get("title", "")
+
+                    # HDHive 解锁
+                    if resource.get("need_unlock") and not share_url:
+                        slug = resource.get("slug")
+                        if slug:
+                            unlocked = self._search_handler.unlock_hdhive_resource(
+                                slug, resource.get("unlock_points", 0)
+                            )
+                            if not unlocked:
+                                continue
+                            share_url = unlocked
+                            resource["url"] = share_url
+                            resource["need_unlock"] = False
+
+                    if not share_url:
+                        continue
+
+                    share_status = self._p115_manager.check_share_status(share_url)
+                    if not share_status.is_valid:
+                        continue
+
+                    share_files = self._p115_manager.list_share_files(
+                        share_url,
+                        target_season=(season if self._skip_other_season_dirs else None)
+                    )
+                    if not share_files:
+                        continue
+
+                    # 匹配需要升级的集数
+                    matched_items = []
+                    for episode in episodes_to_search[:]:
+                        matched_file = FileMatcher.match_episode_file(
+                            share_files, mediainfo.title, season, episode,
+                            subscribe_filter=subscribe_filter
+                        )
+                        if not matched_file:
+                            continue
+
+                        file_name = matched_file.get('name', '')
+                        _, base_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
+
+                        # 直接用 SubscribeFilter.match 的原始分数
+                        _, new_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
+                        if new_score == 0 and subscribe_filter.has_filters():
+                            new_score = 50  # 通过但不命中规则的基础分
+
+                        old_score = local_scores.get(episode, 0)
+                        score_gap = new_score - old_score
+
+                        # 判断是否值得升级
+                        if old_score > 0 and score_gap < tier_threshold:
+                            logger.info(
+                                f"{upgrade_log_prefix} E{episode:02d} 层级差+{score_gap}<{tier_threshold} "
+                                f"（{old_score}→{new_score}），跳过"
+                            )
+                            continue
+
+                        logger.info(
+                            f"{upgrade_log_prefix} E{episode:02d} {old_score}→{new_score}"
+                            f"（层级差+{score_gap}>={tier_threshold}）✓"
+                            if score_gap >= tier_threshold else
+                            f"{upgrade_log_prefix} E{episode:02d} 新文件评分 {new_score}（无历史评分）"
+                        )
+
+                        matched_items.append({
+                            "file": matched_file,
+                            "episode": episode,
+                            "new_score": new_score,
+                            "old_score": old_score,
+                            "score_gap": score_gap,
+                            "file_name": file_name,
+                        })
+
+                    if not matched_items:
+                        continue
+
+                    # 批量转存
+                    file_ids = [item["file"]["id"] for item in matched_items]
+                    success_ids, failed_ids = self._p115_manager.transfer_files_batch(
+                        share_url=share_url, file_ids=file_ids,
+                        save_path=save_dir, batch_size=self._batch_size
+                    )
+
+                    success_id_set = set(success_ids)
+                    for item in matched_items:
+                        file_id = item["file"]["id"]
+                        episode = item["episode"]
+                        new_score = item["new_score"]
+                        old_score = item["old_score"]
+                        file_name = item["file_name"]
+                        success = file_id in success_id_set
+
+                        if success:
+                            transferred_count += 1
+                            upgrade_downloaded += 1
+                            new_priority[str(episode)] = new_score
+
+                            if episode in episodes_to_search:
+                                episodes_to_search.remove(episode)
+
+                            # 收集升级通知
+                            upgrade_notices.append({
+                                "episode": episode,
+                                "old_score": old_score,
+                                "new_score": new_score,
+                                "file_name": file_name,
+                            })
+
+                            # 收集转存详情（用于汇总通知）
+                            existing_detail = next(
+                                (d for d in transfer_details
+                                 if d.get("title") == mediainfo.title and d.get("season") == season),
+                                None
+                            )
+                            if existing_detail:
+                                existing_detail["episodes"].append(episode)
+                            else:
+                                transfer_details.append({
+                                    "type": "电视剧",
+                                    "title": mediainfo.title,
+                                    "year": mediainfo.year,
+                                    "season": season,
+                                    "episodes": [episode],
+                                    "image": mediainfo.get_poster_image()
+                                })
+
+                            logger.info(
+                                f"{upgrade_log_prefix} 转存成功 E{episode:02d}"
+                                f" {old_score}→{new_score}（{file_name}）"
+                            )
+
+            # ---- 6. 更新 episode_priority ----
+            if new_priority != existing_ep_pri:
+                try:
+                    SubscribeOper().update(subscribe.id, {"episode_priority": new_priority})
+                    logger.info(f"{upgrade_log_prefix} 已更新 episode_priority（{len(new_priority)} 集）")
+                except Exception as e:
+                    logger.warning(f"{upgrade_log_prefix} 更新 episode_priority 失败：{e}")
+
+            # ---- 7. 发送洗版通知 ----
+            if upgrade_notices and self._notify and self._post_message:
+                lines = []
+                for n in upgrade_notices:
+                    lines.append(f"E{n['episode']:02d}：{n['old_score']}→{n['new_score']}分")
+                title = f"【洗版转存】{mediainfo.title} S{season:02d}"
+                text = f"共升级 {len(upgrade_notices)} 集\n" + "\n".join(lines[:10])
+                self._post_message(
+                    mtype=NotificationType.Plugin,
+                    title=title,
+                    text=text
+                )
+
+            # 不调用 check_and_finish_subscribe——保持订阅活跃以持续搜索更优资源
+            if upgrade_downloaded:
+                logger.info(f"{upgrade_log_prefix} 洗版转存完成，共升级 {upgrade_downloaded} 集")
+            else:
+                logger.info(f"{upgrade_log_prefix} 洗版转存完成，未发现可升级资源")
+
+        except Exception as e:
+            logger.error(f"【洗版转存】{subscribe.name} 出错：{e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+        return transferred_count
+
     # ==================== 洗版 ====================
 
     @staticmethod
@@ -925,15 +1337,23 @@ class SyncHandler:
 
         # --- 执行扫描 ---
         upgrade_notices = []  # 收集需要通知的升级
+        total_115_deleted = 0
+        deleted_details = []  # 收集低分清理详情
         for subscribe in tv_subs:
             try:
                 result = self._upgrade_scan_single_sub(subscribe)
                 if result:
-                    upgrade_notices.extend(result)
+                    if result.get("upgrades"):
+                        upgrade_notices.extend(result["upgrades"])
+                    dc = result.get("deleted_count", 0)
+                    if dc:
+                        total_115_deleted += dc
+                        for d in result.get("deleted_details", []):
+                            deleted_details.append(d)
             except Exception as e:
                 logger.error(f"[{source_label}洗版] 出错 {subscribe.name} S{subscribe.season or 1}：{e}")
 
-        # --- 发通知 ---
+        # --- 发通知（升级） ---
         if upgrade_notices and self._notify and self._post_message:
             lines = []
             for n in upgrade_notices:
@@ -947,6 +1367,16 @@ class SyncHandler:
                 title = f"【{source_label}洗版】扫描完成"
                 text = f"{source_label}洗版发现 {len(upgrade_notices)} 处升级机会\n\n" + "\n".join(lines[:15])
                 self._post_message(mtype=NotificationType.Plugin, title=title, text=text)
+
+        # --- 发通知（低分清理） ---
+        if total_115_deleted and self._notify and self._post_message:
+            title = f"【{source_label}洗版】低分清理"
+            lines = []
+            for d in deleted_details[:20]:
+                ep_str = f"E{d['episode']:02d}"
+                lines.append(f"{d['sub_name']} S{d['sub_season']:02d} {ep_str} 删{d['file']}\n  原因：{d['reason']}\n  画质评分：{d['score']}→{d['best_score']}")
+            text = f"{source_label}洗版从网盘清理了 {total_115_deleted} 个低分文件\n\n" + "\n".join(lines[:15])
+            self._post_message(mtype=NotificationType.Plugin, title=title, text=text)
 
     def _upgrade_scan_single_sub(self, subscribe):
         """对单个订阅执行洗版扫描，返回升级通知列表"""
@@ -1027,6 +1457,7 @@ class SyncHandler:
         new_priority = dict(old_priority)
         upgrades = []
         deleted_count = 0
+        deleted_details = []
 
         # 按剧集分组评分
         episode_groups = {}  # ep_key -> [(strm_path, score, fname), ...]
@@ -1086,12 +1517,30 @@ class SyncHandler:
 
             # 删除低分旧文件（层级差足够时才删）
             for sf_path, sf_score, sf_fname in candidates[1:]:
-                if sf_score >= 60 and old_score > 0:
-                    gap = best_score - sf_score
-                    if gap >= tier_threshold:
-                        logger.info(f"洗版删除：{subscribe.name} E{episode:02d} 旧文件 {sf_fname}（{sf_score}→{best_score}, 层级差+{gap}>={tier_threshold}）")
-                        if self._delete_old_115_file(sf_path, subscribe):
-                            deleted_count += 1
+                # 删115云端（成功才算有效清理计数）
+                deleted_115 = self._delete_old_115_file(sf_path, subscribe)
+                # 无论115删除是否成功，都删本地strm
+                try:
+                    if sf_path.exists():
+                        sf_path.unlink()
+                        logger.info(f"洗版删除：已删除本地strm {sf_fname}")
+                except Exception as e:
+                    logger.error(f"洗版删除：删除strm失败 {sf_fname}: {e}")
+                # 仅115删除成功才计入通知
+                if deleted_115:
+                    deleted_count += 1
+                    ep_num = int(ep_key)
+                    quality_hint = sf_fname.split(' - ')[-1] if ' - ' in sf_fname else sf_fname
+                    deleted_details.append({
+                        'sub_name': subscribe.name,
+                        'sub_season': season,
+                        'episode': ep_num,
+                        'file': sf_fname,
+                        'score': sf_score,
+                        'best_score': best_score,
+                        'quality': quality_hint,
+                        'reason': f"评分{sf_score}分低于最高分{best_score}分"
+                    })
 
         # 写入 episode_priority
         if new_priority != old_priority:
@@ -1102,7 +1551,13 @@ class SyncHandler:
         if deleted_count:
             logger.info(f"洗版删除：{subscribe.name} S{season:02d} 共删除 {deleted_count} 个旧文件")
 
-        return upgrades
+        return {
+            "upgrades": upgrades,
+            "deleted_count": deleted_count,
+            "deleted_details": deleted_details,
+            "sub_name": subscribe.name,
+            "sub_season": season
+        }
 
     def _delete_old_115_file(self, strm_path: Path, subscribe) -> bool:
         """根据旧strm文件路径，删除115上对应的文件
