@@ -44,7 +44,6 @@ class SyncHandler:
         post_message_func: Callable = None,
         get_data_func: Callable = None,
         save_data_func: Callable = None,
-        global_exclude: str = "",
         min_upgrade_tiers: int = 2,
         self_heal_interval: int = 10,
         enable_cloud_upgrade: bool = False,
@@ -55,7 +54,10 @@ class SyncHandler:
         cloud_movie_local_dir: str = "",
         cloud_movie_remote_dir: str = "",
         frame_rate_pattern: str = r"60fps|120fps",
-        bit_rate_pattern: str = r"TrueHD|DTS-HD|DTS5\.1|ATMOS|LPCM|FLAC"
+        bit_rate_pattern: str = r"TrueHD|DTS-HD|DTS5\.1|ATMOS|LPCM|FLAC",
+        vivid_pattern: str = r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid",
+        upgrade_mode: str = "smart",
+        upgrade_threshold: int = 25
     ):
         """
         初始化同步处理器
@@ -73,7 +75,6 @@ class SyncHandler:
         :param post_message_func: 发送消息的函数
         :param get_data_func: 获取数据的函数
         :param save_data_func: 保存数据的函数
-        :param global_exclude: 全局兜底排除正则
         :param min_upgrade_tiers: 最小洗版层级差
         :param self_heal_interval: 自愈检查间隔（分钟）
         :param enable_cloud_upgrade: 启用网盘洗版
@@ -83,6 +84,9 @@ class SyncHandler:
         :param cloud_tv_remote_dir: 115网盘电视剧目录（网盘洗版用）
         :param cloud_movie_local_dir: 本地电影strm根目录（网盘洗版用）
         :param cloud_movie_remote_dir: 115网盘电影目录（网盘洗版用）
+        :param frame_rate_pattern: 帧率正则，匹配加 100 分
+        :param bit_rate_pattern: 比特深度正则，匹配加 100 分（已保留但后续改用 bit_depth_pattern）
+        :param vivid_pattern: HDR Vivid 加分正则，匹配在 effect 基础上额外 +50
         """
         self._p115_manager = p115_manager
         self._search_handler = search_handler
@@ -97,7 +101,6 @@ class SyncHandler:
         self._post_message = post_message_func
         self._get_data = get_data_func
         self._save_data = save_data_func
-        self._global_exclude = global_exclude or ""
         self._min_upgrade_tiers = min_upgrade_tiers
         self._self_heal_interval = self_heal_interval
         self._enable_cloud_upgrade = enable_cloud_upgrade
@@ -107,6 +110,15 @@ class SyncHandler:
         self._cloud_tv_remote_dir = cloud_tv_remote_dir or ""
         self._cloud_movie_local_dir = cloud_movie_local_dir or ""
         self._cloud_movie_remote_dir = cloud_movie_remote_dir or ""
+        self._frame_rate_pattern = frame_rate_pattern or r"60fps|120fps"
+        self._bit_depth_pattern = bit_rate_pattern or r"10bit|12bit|10-bit"
+        self._vivid_pattern = vivid_pattern or r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid"
+        self._upgrade_mode = upgrade_mode
+        self._upgrade_threshold = upgrade_threshold
+
+        # 延迟删除队列配置
+        self._pending_delay = 60  # 1分钟延迟
+        self._pending_key = "pending_deletions_v2"
 
     def process_movie_subscribe(
         self,
@@ -186,12 +198,7 @@ class SyncHandler:
 
             # 创建订阅过滤条件
             # exclude/filter 是硬拒绝：命中即丢弃
-            # 当订阅未配置 exclude 时，叠加插件全局兜底 exclude（杜比视界拦截）
             effective_exclude = getattr(subscribe, 'exclude', None)
-            if self._global_exclude and not effective_exclude:
-                effective_exclude = self._global_exclude
-            elif self._global_exclude and effective_exclude:
-                effective_exclude = f"(?:{effective_exclude})|(?:{self._global_exclude})"
             subscribe_filter = SubscribeFilter(
                 quality=subscribe.quality,
                 resolution=subscribe.resolution,
@@ -199,6 +206,9 @@ class SyncHandler:
                 include=getattr(subscribe, 'include', None),
                 exclude=effective_exclude,
                 filter=getattr(subscribe, 'filter', None),
+                framerate=self._frame_rate_pattern,
+                bit_depth=self._bit_depth_pattern,
+                vivid_pattern=self._vivid_pattern,
                 strict=not is_best_version
             )
             if subscribe_filter.has_filters():
@@ -569,12 +579,7 @@ class SyncHandler:
 
             # 创建订阅过滤条件
             # exclude/filter 是硬拒绝：命中即丢弃
-            # 当订阅未配置 exclude 时，叠加插件全局兜底 exclude（杜比视界拦截）
             effective_exclude = getattr(subscribe, 'exclude', None)
-            if self._global_exclude and not effective_exclude:
-                effective_exclude = self._global_exclude
-            elif self._global_exclude and effective_exclude:
-                effective_exclude = f"(?:{effective_exclude})|(?:{self._global_exclude})"
             subscribe_filter = SubscribeFilter(
                 quality=subscribe.quality,
                 resolution=subscribe.resolution,
@@ -582,6 +587,9 @@ class SyncHandler:
                 include=getattr(subscribe, 'include', None),
                 exclude=effective_exclude,
                 filter=getattr(subscribe, 'filter', None),
+                framerate=self._frame_rate_pattern,
+                bit_depth=self._bit_depth_pattern,
+                vivid_pattern=self._vivid_pattern,
                 strict=not is_best_version
             )
             if subscribe_filter.has_filters():
@@ -861,6 +869,166 @@ class SyncHandler:
 
         return transferred_count
 
+    # ==================== 洗版体积评分 ====================
+
+    @staticmethod
+    def _query_file_size_from_db(tmdbid: int, season: int, episode: int) -> int:
+        """
+        从 MP transferhistory 表查询文件大小
+        仅支持走 MP 整理流程的转存文件，分享链接生成的 strm 查不到返回 0
+        """
+        try:
+            from app.db import SessionFactory
+            from sqlalchemy import text
+            seasons_str = f"S{season:02d}"
+            episodes_str = f"E{episode:02d}"
+            with SessionFactory() as db:
+                result = db.execute(
+                    text(
+                        "SELECT json_extract(src_fileitem, '$.size') "
+                        "FROM transferhistory "
+                        "WHERE tmdbid = :tmdbid AND seasons = :seasons AND episodes = :episodes "
+                        "ORDER BY id DESC LIMIT 1"
+                    ),
+                    {"tmdbid": tmdbid, "seasons": seasons_str, "episodes": episodes_str}
+                ).scalar()
+                return int(result) if result else 0
+        except Exception as e:
+            logger.warning(f"查询文件大小失败 tmdbid={tmdbid} S{season}E{episode}: {e}")
+            return 0
+
+    @staticmethod
+    def _calc_size_score(existing_size: int, candidate_size: int) -> int:
+        """
+        计算体积得分 (0~100)
+        候选文件比现有文件大多少分
+        """
+        if existing_size <= 0:
+            return 0  # 无现有文件则体积分为0
+        ratio = candidate_size / existing_size
+        if ratio < 0.85:
+            return -50  # 明显变小，淘汰
+        if ratio < 1.0:
+            return 0
+        if ratio < 1.15:
+            return 30
+        if ratio < 1.30:
+            return 60
+        if ratio < 1.50:
+            return 80
+        return 100
+
+    @staticmethod
+    def _calc_total_upgrade_score(
+        rule_score: int,
+        existing_size: int,
+        candidate_size: int,
+        mode: str = "smart"
+    ) -> int:
+        """
+        计算综合洗版评分 (0~100)
+        :param rule_score: MP 规则组评分 (93-100)，来自 _get_mp_rule_score()
+        :param existing_size: 现有文件大小（字节）
+        :param candidate_size: 候选文件大小（字节）
+        :param mode: 'simple'=纯体积, 'smart'=体积×0.75+画质×0.25
+        """
+        size_score = SyncHandler._calc_size_score(existing_size, candidate_size)
+        if mode == "simple":
+            return max(size_score, 0)
+        else:
+            normalized_rule = min(rule_score, 100)  # 已在 93-100 范围
+            total = size_score * 0.75 + normalized_rule * 0.25
+            return max(int(total), 0)
+
+    @staticmethod
+    def _get_mp_rule_score(filename: str, filesize: int, subscribe, season: int) -> int:
+        """
+        使用 MP 原生规则组评分，与 PT 选种同源。
+        :return: pri_order (93-100), 规则组无匹配时返回 60
+        """
+        try:
+            from app.schemas import TorrentInfo
+            from app.core.context import MediaInfo
+            from app.modules.filter import FilterModule
+            from app.schemas.types import MediaType
+
+            rule_group_names = getattr(subscribe, 'filter_groups', None) or []
+            if not rule_group_names:
+                from app.db.systemconfig_oper import SystemConfigOper, SystemConfigKey
+                rule_group_names = SystemConfigOper().get(SystemConfigKey.BestVersionFilterRuleGroups) or []
+
+            fake_mediainfo = MediaInfo(type=MediaType.TV)
+            fake_torrent = TorrentInfo(
+                title=filename,
+                size=filesize or 0,
+                description='',
+                labels=[]
+            )
+
+            filter_module = FilterModule()
+            filter_module.init_module()
+            matched = filter_module.filter_torrents(
+                rule_groups=rule_group_names,
+                torrent_list=[fake_torrent],
+                mediainfo=fake_mediainfo
+            )
+            if matched:
+                score = matched[0].pri_order
+                return score if score >= 60 else 60
+            return 60
+        except Exception as e:
+            logger.warning(f"MP规则组评分失败（回退基础分）: {e}")
+            return 60
+
+    def _read_ep_priority(self, subscribe) -> dict:
+        """读取 episode_priority，返回纯 int 格式 {ep: score}"""
+        raw = getattr(subscribe, 'episode_priority', None) or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        result = {}
+        if isinstance(raw, dict):
+            for key, val in raw.items():
+                if isinstance(val, dict):
+                    result[key] = int(val.get("score", 0))
+                elif isinstance(val, (int, float)):
+                    result[key] = int(val)
+                else:
+                    result[key] = 0
+        return result
+
+    def _save_ep_priority(self, subscribe, priority: dict):
+        """写入 episode_priority（纯 int 格式）"""
+        from app.db.subscribe_oper import SubscribeOper
+        from app.schemas.types import MediaType
+        try:
+            # 统一转为纯 int 格式
+            clean = {}
+            for k, v in priority.items():
+                if isinstance(v, dict):
+                    clean[k] = int(v.get("score", 0))
+                elif isinstance(v, (int, float)):
+                    clean[k] = int(v)
+                else:
+                    clean[k] = 0
+            SubscribeOper().update(subscribe.id, {"episode_priority": clean})
+        except Exception as e:
+            logger.warning(f"更新 episode_priority 失败: {e}")
+
+    def _get_existing_ep_size(self, subscribe, episode: int, local_dir: str) -> int:
+        """
+        获取现有文件的真实大小。
+        直接从 MP 数据库查询 transferhistory。
+        episode_priority 已改为纯 int（无大小信息），不再缓存 size。
+        """
+        return self._query_file_size_from_db(
+            tmdbid=subscribe.tmdbid,
+            season=subscribe.season or 1,
+            episode=episode
+        )
+
     def _process_tv_subscribe_upgrade(
         self,
         subscribe,
@@ -909,19 +1077,18 @@ class SyncHandler:
 
             # ---- 2. 构建过滤条件（宽松模式） ----
             effective_exclude = getattr(subscribe, 'exclude', None)
-            if self._global_exclude and not effective_exclude:
-                effective_exclude = self._global_exclude
-            elif self._global_exclude and effective_exclude:
-                effective_exclude = f"(?:{effective_exclude})|(?:{self._global_exclude})"
             subscribe_filter = SubscribeFilter(
                 quality=subscribe.quality, resolution=subscribe.resolution,
                 effect=subscribe.effect, include=getattr(subscribe, 'include', None),
                 exclude=effective_exclude, filter=getattr(subscribe, 'filter', None),
+                framerate=self._frame_rate_pattern,
+                bit_depth=self._bit_depth_pattern,
+                vivid_pattern=self._vivid_pattern,
                 strict=False  # 洗版模式宽松匹配
             )
 
             # 层级阈值 = 每条规则 100 分 × 最低提升层级数
-            tier_threshold = 100 * self._min_upgrade_tiers
+            tier_threshold = self._upgrade_threshold
 
             # ---- 3. 扫描本地 strm 目录，获取已有画质评分 ----
             show_name = subscribe.name
@@ -950,18 +1117,11 @@ class SyncHandler:
                     local_dir = test_dir
                     break
 
-            # 读取已有的 episode_priority
-            existing_ep_pri = {}
-            raw_pri = getattr(subscribe, 'episode_priority', None) or {}
-            if isinstance(raw_pri, str):
-                try:
-                    raw_pri = json.loads(raw_pri)
-                except Exception:
-                    raw_pri = {}
-            existing_ep_pri = raw_pri if isinstance(raw_pri, dict) else {}
+            # 读取已有的 episode_priority（兼容新旧格式）
+            existing_ep_pri = self._read_ep_priority(subscribe)
 
-            # 扫描本地 strm 文件评分
-            local_scores = {}  # episode_num -> score
+            # 扫描本地 strm 文件评分（含体积）
+            local_scores = {}  # episode_num -> {"score": int, "size": int}
             if local_dir and Path(local_dir).exists():
                 strm_files = list(Path(local_dir).glob("*.strm"))
                 for sf in strm_files:
@@ -971,25 +1131,26 @@ class SyncHandler:
                         continue
                     episode = int(ep_match.group(1))
 
-                    # 直接用 SubscribeFilter.match 的原始分数（0~300）
-                    matched, filter_score = subscribe_filter.match(fname) if subscribe_filter.has_filters() else (True, 0)
-                    if not matched:
-                        continue
+                    # MP 规则组评分 + 体积评分 = 综合分
+                    ep_size = self._get_existing_ep_size(subscribe, episode, local_dir)
+                    pri_order = self._get_mp_rule_score(fname, ep_size, subscribe, season)
+                    total_score = self._calc_total_upgrade_score(
+                        rule_score=pri_order,
+                        existing_size=ep_size or 1,
+                        candidate_size=ep_size or 1,
+                        mode=self._upgrade_mode
+                    )
 
-                    # strict=False: 即使不匹配也通过，但分数可能是 0（无规则命中）
-                    # 对于完全没命中任何规则的，给一个基础分 50（表示存在但低质）
-                    if filter_score == 0 and subscribe_filter.has_filters():
-                        filter_score = 50
-
-                    if episode not in local_scores or filter_score > local_scores[episode]:
-                        local_scores[episode] = filter_score
+                    if episode not in local_scores or total_score > local_scores[episode]:
+                        local_scores[episode] = total_score
 
             # 合并 episode_priority 中的历史记录
-            for ep_key, ep_score in existing_ep_pri.items():
+            for ep_key, ep_val in existing_ep_pri.items():
                 try:
                     ep_num = int(ep_key)
-                    if ep_num not in local_scores or ep_score > local_scores[ep_num]:
-                        local_scores[ep_num] = ep_score
+                    hist_score = int(ep_val) if not isinstance(ep_val, dict) else int(ep_val.get("score", 0))
+                    if ep_num not in local_scores or hist_score > local_scores[ep_num]:
+                        local_scores[ep_num] = hist_score
                 except (ValueError, TypeError):
                     pass
 
@@ -1005,7 +1166,7 @@ class SyncHandler:
                 )
 
             logger.info(f"{upgrade_log_prefix} 本地已有 {len(local_scores)} 集 strm 文件，"
-                        f"阈值为 {tier_threshold} 分（_min_upgrade_tiers={self._min_upgrade_tiers}）")
+                        f"阈值为 {tier_threshold} 分（upgrade_threshold={self._upgrade_threshold}）")
 
             # ---- 4. 构造待搜索的集数列表 ----
             total_ep = subscribe.total_episode or 0
@@ -1015,7 +1176,7 @@ class SyncHandler:
             # 需要升级 = 已有评分但未满分的 + 完全缺失的
             episodes_to_search = set()
             for ep_num in sorted(local_scores.keys()):
-                if local_scores[ep_num] < 300:
+                if local_scores[ep_num] < 100:  # 满分100
                     episodes_to_search.add(ep_num)
 
             if all_expected_episodes:
@@ -1135,27 +1296,35 @@ class SyncHandler:
                             continue
 
                         file_name = matched_file.get('name', '')
-                        _, base_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
+                        # 候选文件大小（115 API 搜索已自带）
+                        candidate_size = int(matched_file.get('size', 0)) or 0
 
-                        # 直接用 SubscribeFilter.match 的原始分数
-                        _, new_score = subscribe_filter.match(file_name) if subscribe_filter.has_filters() else (True, 0)
-                        if new_score == 0 and subscribe_filter.has_filters():
-                            new_score = 50  # 通过但不命中规则的基础分
-
+                        # 现有文件信息（纯 int 评分）
                         old_score = local_scores.get(episode, 0)
+                        existing_size = self._get_existing_ep_size(subscribe, episode, local_dir) if old_score > 0 else 0
+
+                        # 候选文件用 MP 规则组评分 + 体积评分 = 综合分
+                        cand_pri = self._get_mp_rule_score(file_name, candidate_size, subscribe, season)
+                        new_score = self._calc_total_upgrade_score(
+                            rule_score=cand_pri,
+                            existing_size=existing_size or candidate_size,
+                            candidate_size=candidate_size or existing_size,
+                            mode=self._upgrade_mode
+                        )
+
                         score_gap = new_score - old_score
 
                         # 判断是否值得升级
                         if old_score > 0 and score_gap < tier_threshold:
                             logger.info(
-                                f"{upgrade_log_prefix} E{episode:02d} 层级差+{score_gap}<{tier_threshold} "
+                                f"{upgrade_log_prefix} E{episode:02d} 提升+{score_gap}<{tier_threshold} "
                                 f"（{old_score}→{new_score}），跳过"
                             )
                             continue
 
                         logger.info(
                             f"{upgrade_log_prefix} E{episode:02d} {old_score}→{new_score}"
-                            f"（层级差+{score_gap}>={tier_threshold}）✓"
+                            f"（提升+{score_gap}>={tier_threshold}）✓"
                             if score_gap >= tier_threshold else
                             f"{upgrade_log_prefix} E{episode:02d} 新文件评分 {new_score}（无历史评分）"
                         )
@@ -1167,6 +1336,7 @@ class SyncHandler:
                             "old_score": old_score,
                             "score_gap": score_gap,
                             "file_name": file_name,
+                            "candidate_size": candidate_size,
                         })
 
                     if not matched_items:
@@ -1191,7 +1361,8 @@ class SyncHandler:
                         if success:
                             transferred_count += 1
                             upgrade_downloaded += 1
-                            new_priority[str(episode)] = new_score
+                            candidate_size = item.get("candidate_size", 0)
+                            new_priority[str(episode)] = {"score": new_score, "size": candidate_size}
 
                             if episode in episodes_to_search:
                                 episodes_to_search.remove(episode)
@@ -1203,6 +1374,19 @@ class SyncHandler:
                                 "new_score": new_score,
                                 "file_name": file_name,
                             })
+
+                            # 立即删除旧strm（新文件已转存到115，strm尚未创建，无竞态）
+                            if local_dir and Path(local_dir).exists():
+                                ep_patterns = [f"E{episode:02d}", f"E{episode:03d}", f"S{season:02d}E{episode:02d}"]
+                                for sf in Path(local_dir).glob("*.strm"):
+                                    for p in ep_patterns:
+                                        if p in sf.name.replace('.strm', ''):
+                                            try:
+                                                sf.unlink()
+                                                logger.info(f"[洗版清理] 已删除旧strm：{sf.name}")
+                                            except Exception as e:
+                                                logger.error(f"[洗版清理] 删除strm失败 {sf.name}: {e}")
+                                            break
 
                             # 收集转存详情（用于汇总通知）
                             existing_detail = next(
@@ -1235,18 +1419,25 @@ class SyncHandler:
                 except Exception as e:
                     logger.warning(f"{upgrade_log_prefix} 更新 episode_priority 失败：{e}")
 
-            # ---- 7. 发送洗版通知 ----
+            # ---- 7. 发送洗版通知（事件驱动，仅显示真正升级的集数） ----
             if upgrade_notices and self._notify and self._post_message:
-                lines = []
-                for n in upgrade_notices:
-                    lines.append(f"E{n['episode']:02d}：{n['old_score']}→{n['new_score']}分")
-                title = f"【洗版转存】{mediainfo.title} S{season:02d}"
-                text = f"共升级 {len(upgrade_notices)} 集\n" + "\n".join(lines[:10])
-                self._post_message(
-                    mtype=NotificationType.Plugin,
-                    title=title,
-                    text=text
-                )
+                real_upgrades = [n for n in upgrade_notices if n['old_score'] > 0]
+                if real_upgrades:
+                    lines = []
+                    for n in real_upgrades:
+                        lines.append(
+                            f"S{season:02d} E{n['episode']:02d} "
+                            f"评分 {n['old_score']}→{n['new_score']}分"
+                        )
+                        if n.get('file_name'):
+                            lines.append(f"  资源：{n['file_name']}")
+                    title = f"【网盘洗版】转存升级"
+                    text = f"{mediainfo.title} 共升级 {len(real_upgrades)} 集\n\n" + "\n".join(lines[:15])
+                    self._post_message(
+                        mtype=NotificationType.Plugin,
+                        title=title,
+                        text=text
+                    )
 
             # 不调用 check_and_finish_subscribe——保持订阅活跃以持续搜索更优资源
             if upgrade_downloaded:
@@ -1288,6 +1479,83 @@ class SyncHandler:
                 rules = filter_groups.get('rules', [])
                 tiers += len(rules) if isinstance(rules, list) else 0
         return max(tiers, 1)
+
+    # ==================== 延迟删除机制 ====================
+
+    def _add_pending_deletion(self, strm_path: Path, subscribe, file_name: str,
+                              old_score: int, best_score: int, source: str = "cloud"):
+        """
+        将旧strm文件加入延迟删除队列，1分钟后自动清理
+        避免新strm还没生成时误删文件
+        """
+        import time
+        episode = 0
+        import re
+        ep_match = re.search(r'[Ee](\d{2,4})', strm_path.name.replace('.strm', ''))
+        if ep_match:
+            episode = int(ep_match.group(1))
+
+        pending = self._get_data(self._pending_key) or {}
+        pending.setdefault("items", [])
+        pending["items"].append({
+            "strm_path": str(strm_path),
+            "sub_id": subscribe.id,
+            "sub_name": subscribe.name,
+            "season": subscribe.season or 1,
+            "episode": episode,
+            "file_name": file_name,
+            "score": old_score,
+            "best_score": best_score,
+            "delete_at": time.time() + self._pending_delay,
+            "source": source
+        })
+        self._save_data(self._pending_key, pending)
+        logger.info(f"[延迟删除] 已加入队列：{strm_path.name}（{old_score}→{best_score}）{self._pending_delay}秒后删除")
+
+    def process_expired_deletions(self):
+        """
+        处理到期的延迟删除任务
+        删除本地strm并尝试清理115文件（联动daemon兜底）
+        """
+        import time
+        from pathlib import Path
+
+        pending = self._get_data(self._pending_key) or {}
+        items = pending.get("items", [])
+        if not items:
+            return
+
+        now = time.time()
+        remaining = []
+        deleted_count = 0
+        deleted_details = []
+
+        for item in items:
+            if item["delete_at"] <= now:
+                strm_path = Path(item["strm_path"])
+                fname = strm_path.name
+                if strm_path.exists():
+                    # 删除本地strm
+                    try:
+                        strm_path.unlink()
+                        deleted_count += 1
+                        logger.info(f"[延迟删除] 已删除strm：{fname}")
+                        deleted_details.append(item)
+                    except Exception as e:
+                        logger.error(f"[延迟删除] 删除strm失败 {fname}: {e}")
+                else:
+                    logger.debug(f"[延迟删除] strm已不存在：{fname}，跳过")
+            else:
+                remaining.append(item)
+
+        if deleted_count:
+            logger.info(f"[延迟删除] 本次共删除 {deleted_count} 个旧文件")
+
+        # 更新存储
+        pending["items"] = remaining
+        self._save_data(self._pending_key, pending)
+
+        return deleted_count, deleted_details
 
     def auto_upgrade_scan(self, source: str = "cloud"):
         """
@@ -1353,30 +1621,11 @@ class SyncHandler:
             except Exception as e:
                 logger.error(f"[{source_label}洗版] 出错 {subscribe.name} S{subscribe.season or 1}：{e}")
 
-        # --- 发通知（升级） ---
-        if upgrade_notices and self._notify and self._post_message:
-            lines = []
-            for n in upgrade_notices:
-                ep_str = f"S{n['episode']:02d}"
-                gap_str = f"层级差+{n['tier_gap']}>={n['threshold']}" if n['enough'] else f"层级差+{n['tier_gap']}<{n['threshold']}跳过删除"
-                old_file = n.get('old_file', '').rsplit('/', 1)[-1] if n.get('old_file') else ''
-                new_file = n.get('new_file', '').rsplit('/', 1)[-1] if n.get('new_file') else ''
-                file_info = f"  {old_file}→{new_file}" if old_file and new_file else ""
-                lines.append(f"{n['name']} {ep_str}: {n['old_score']}→{n['new_score']} ({gap_str}){file_info}")
-            if lines:
-                title = f"【{source_label}洗版】扫描完成"
-                text = f"{source_label}洗版发现 {len(upgrade_notices)} 处升级机会\n\n" + "\n".join(lines[:15])
-                self._post_message(mtype=NotificationType.Plugin, title=title, text=text)
-
-        # --- 发通知（低分清理） ---
-        if total_115_deleted and self._notify and self._post_message:
-            title = f"【{source_label}洗版】低分清理"
-            lines = []
-            for d in deleted_details[:20]:
-                ep_str = f"E{d['episode']:02d}"
-                lines.append(f"{d['sub_name']} S{d['sub_season']:02d} {ep_str} 删{d['file']}\n  原因：{d['reason']}\n  画质评分：{d['score']}→{d['best_score']}")
-            text = f"{source_label}洗版从网盘清理了 {total_115_deleted} 个低分文件\n\n" + "\n".join(lines[:15])
-            self._post_message(mtype=NotificationType.Plugin, title=title, text=text)
+        # --- 扫描结果（通知已由事件驱动发送，此处仅日志） ---
+        if upgrade_notices:
+            logger.info(f"[{source_label}洗版] 发现 {len(upgrade_notices)} 处升级机会（通知已由事件驱动发送）")
+        if total_115_deleted:
+            logger.info(f"[{source_label}洗版] 清理了 {total_115_deleted} 个低分文件（通知已由事件驱动发送）")
 
     def _upgrade_scan_single_sub(self, subscribe):
         """对单个订阅执行洗版扫描，返回升级通知列表"""
@@ -1389,10 +1638,6 @@ class SyncHandler:
 
         # 构建 SubscribeFilter
         effective_exclude = getattr(subscribe, 'exclude', None)
-        if self._global_exclude and not effective_exclude:
-            effective_exclude = self._global_exclude
-        elif self._global_exclude and effective_exclude:
-            effective_exclude = f"(?:{effective_exclude})|(?:{self._global_exclude})"
         subscribe_filter = SubscribeFilter(
             quality=subscribe.quality,
             resolution=subscribe.resolution,
@@ -1401,6 +1646,9 @@ class SyncHandler:
             exclude=effective_exclude,
             filter=getattr(subscribe, 'filter', None),
             filter_group_rules=getattr(subscribe, 'filter_groups', None),
+            framerate=self._frame_rate_pattern,
+            bit_depth=self._bit_depth_pattern,
+            vivid_pattern=self._vivid_pattern,
             strict=False
         )
 
@@ -1444,23 +1692,16 @@ class SyncHandler:
 
         logger.info(f"洗版扫描：{subscribe.name} S{season:02d} 发现 {len(strm_files)} 个strm文件")
 
-        # 读取现有的 episode_priority
-        old_priority = {}
-        raw = getattr(subscribe, 'episode_priority', None) or {}
-        if isinstance(raw, str):
-            try:
-                raw = json.loads(raw)
-            except Exception:
-                raw = {}
-        old_priority = raw if isinstance(raw, dict) else {}
+        # 读取现有的 episode_priority（兼容新旧格式）
+        old_priority = self._read_ep_priority(subscribe)
 
         new_priority = dict(old_priority)
         upgrades = []
         deleted_count = 0
         deleted_details = []
 
-        # 按剧集分组评分
-        episode_groups = {}  # ep_key -> [(strm_path, score, fname), ...]
+        # 按剧集分组评分（含体积）
+        episode_groups = {}  # ep_key -> [(strm_path, score, fname, size), ...]
         for sf in strm_files:
             fname = sf.name.replace('.strm', '')
             ep_match = re.search(r'[Ee](\d{2,4})', fname) or re.search(r'第\s*(\d+)\s*集', fname)
@@ -1468,37 +1709,34 @@ class SyncHandler:
                 continue
             episode = int(ep_match.group(1))
 
-            matched, score = subscribe_filter.match(fname) if subscribe_filter.has_filters() else (True, 0)
-            if not matched:
-                continue
-
-            # 层级分数（60~100区间）
-            if total_tiers > 1 and subscribe_filter.has_filters():
-                hit_count = sum([
-                    1 if subscribe.quality and re.search(subscribe.quality, fname, re.IGNORECASE) else 0,
-                    1 if subscribe.resolution and re.search(subscribe.resolution, fname, re.IGNORECASE) else 0,
-                    1 if subscribe.effect and re.search(subscribe.effect, fname, re.IGNORECASE) else 0,
-                ])
-                tier_score = 60 + int(hit_count / total_tiers * 40) if total_tiers > 0 else 60
-            else:
-                tier_score = 60 if score == 0 else score
+            # MP 规则组评分 + 体积评分 = 综合分
+            ep_size = self._get_existing_ep_size(subscribe, episode, local_dir)
+            pri_order = self._get_mp_rule_score(fname, ep_size, subscribe, season)
+            # 综合分：体积×0.75 + 画质×0.25
+            total_score = self._calc_total_upgrade_score(
+                rule_score=pri_order,
+                existing_size=ep_size or 1,
+                candidate_size=ep_size or 1,
+                mode=self._upgrade_mode
+            )
 
             ep_key = str(episode)
-            episode_groups.setdefault(ep_key, []).append((sf, tier_score, fname))
+            episode_groups.setdefault(ep_key, []).append((sf, total_score, fname, ep_size, pri_order))
 
         # 逐集处理：保留最高分，删除低分旧文件
         for ep_key, candidates in episode_groups.items():
             # 按分数降序排列
             candidates.sort(key=lambda x: x[1], reverse=True)
-            best_path, best_score, best_fname = candidates[0]
+            best_path, best_score, best_fname, best_size, best_pri_order = candidates[0]
 
             episode = int(ep_key)
             old_score = old_priority.get(ep_key, 0)
-            tier_threshold = int(100 / total_tiers * self._min_upgrade_tiers) if total_tiers > 0 else 40
+            tier_threshold = self._upgrade_threshold
 
             if best_score > old_score:
-                # 更新priority
-                new_priority[ep_key] = best_score
+                # 更新 episode_priority：存 MP 规则组评分（pri_order），用于 PT 选种对齐
+                # best_score 是综合分（含体积），best_pri_order 是纯规则组评分
+                new_priority[ep_key] = max(best_pri_order, int(old_priority.get(ep_key, 0)))
 
                 if old_score > 0:
                     tier_gap = best_score - old_score
@@ -1515,32 +1753,33 @@ class SyncHandler:
                     })
                     logger.info(f"洗版扫描：{subscribe.name} E{episode:02d} {old_score}→{best_score}")
 
-            # 删除低分旧文件（层级差足够时才删）
-            for sf_path, sf_score, sf_fname in candidates[1:]:
-                # 删115云端（成功才算有效清理计数）
-                deleted_115 = self._delete_old_115_file(sf_path, subscribe)
-                # 无论115删除是否成功，都删本地strm
+            # 删除低分旧文件
+            for sf_path, sf_score, sf_fname, sf_size, sf_pri in candidates[1:]:
+                # 删115云端（尝试但不要求成功，联动删除daemon兜底）
+                try:
+                    self._delete_old_115_file(sf_path, subscribe)
+                except Exception as e:
+                    logger.warning(f"洗版删除：115删除尝试失败（由联动daemon兜底）{sf_fname}: {e}")
+                # 删本地strm（成功才算有效清理计数）
                 try:
                     if sf_path.exists():
                         sf_path.unlink()
                         logger.info(f"洗版删除：已删除本地strm {sf_fname}")
+                        deleted_count += 1
+                        ep_num = int(ep_key)
+                        quality_hint = sf_fname.split(' - ')[-1] if ' - ' in sf_fname else sf_fname
+                        deleted_details.append({
+                            'sub_name': subscribe.name,
+                            'sub_season': season,
+                            'episode': ep_num,
+                            'file': sf_fname,
+                            'score': sf_score,
+                            'best_score': best_score,
+                            'quality': quality_hint,
+                            'reason': f"评分{sf_score}分低于最高分{best_score}分"
+                        })
                 except Exception as e:
                     logger.error(f"洗版删除：删除strm失败 {sf_fname}: {e}")
-                # 仅115删除成功才计入通知
-                if deleted_115:
-                    deleted_count += 1
-                    ep_num = int(ep_key)
-                    quality_hint = sf_fname.split(' - ')[-1] if ' - ' in sf_fname else sf_fname
-                    deleted_details.append({
-                        'sub_name': subscribe.name,
-                        'sub_season': season,
-                        'episode': ep_num,
-                        'file': sf_fname,
-                        'score': sf_score,
-                        'best_score': best_score,
-                        'quality': quality_hint,
-                        'reason': f"评分{sf_score}分低于最高分{best_score}分"
-                    })
 
         # 写入 episode_priority
         if new_priority != old_priority:
