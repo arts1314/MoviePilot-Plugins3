@@ -43,7 +43,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.1"
+    plugin_version = "1.6.2"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -132,6 +132,11 @@ class P115StrgmSub(_PluginBase):
     _bit_rate_pattern: str = r"10bit|12bit|10-bit|12-bit"
     _vivid_pattern: str = r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid"
     # 自动注册MP过滤规则到系统
+    _global_exclude: str = r"DoVi|Dolby[\s.]?Vision|DOVI|杜比视界"
+    _subscribe_auto_fill: bool = True
+    # 新增订阅时自动填充的规则组（内置SubscribeGroup功能）
+    _subscribe_tv_rule_group: str = "电视剧非杜比含VIVID"
+    _subscribe_movie_rule_group: str = "电影非杜比"
     _auto_register_rules: bool = True
     # 优先级规则组预设（none=保留用户现有, no_dovi=非杜比含VIVID, dovi=含杜比, custom=自定义）
     _tv_rule_group_preset: str = "none"
@@ -627,6 +632,7 @@ class P115StrgmSub(_PluginBase):
         保留：新订阅兜底
         - 已屏蔽系统订阅时：新订阅必拉回仅115
         - 已恢复系统订阅时：新订阅同步窗口站点（保持一致）
+        - 自动填充规则（内置 SubscribeGroup 功能）
         """
         sid = self._get_subscribe_id_from_event(event)
         if not sid:
@@ -649,6 +655,37 @@ class P115StrgmSub(_PluginBase):
             else:
                 # 取消屏蔽时段：不干预用户选择
                 logger.info(f"取消屏蔽时段：新增订阅保持用户原始站点（subscribe_id={sid}）")
+
+            # --- 自动填充规则（内置 SubscribeGroup 功能） ---
+            if self._subscribe_auto_fill:
+                try:
+                    with SessionFactory() as db:
+                        subscribe = SubscribeOper(db=db).get(sid)
+                        if subscribe:
+                            update_dict = {}
+                            is_tv = subscribe.type == MediaType.TV.value
+
+                            # 根据媒体类型选择规则组
+                            if is_tv and self._subscribe_tv_rule_group:
+                                update_dict["filter_groups"] = [self._subscribe_tv_rule_group]
+                                update_dict["best_version"] = 1
+                                logger.info(f"新增订阅 {subscribe.name}：电视剧→规则组「{self._subscribe_tv_rule_group}」+ 开启洗版")
+                            elif not is_tv and self._subscribe_movie_rule_group:
+                                update_dict["filter_groups"] = [self._subscribe_movie_rule_group]
+                                logger.info(f"新增订阅 {subscribe.name}：电影→规则组「{self._subscribe_movie_rule_group}」")
+
+                            # 叠加全局 exclude（DoVi 硬拒绝）
+                            global_exclude = getattr(self, '_global_exclude_pattern', None) or self._global_exclude
+                            if global_exclude and not update_dict.get("exclude"):
+                                update_dict["exclude"] = global_exclude
+                            elif global_exclude and update_dict.get("exclude"):
+                                update_dict["exclude"] = f"{update_dict['exclude']}|{global_exclude}"
+
+                            if update_dict:
+                                SubscribeOper(db=db).update(sid, update_dict)
+                                logger.info(f"新订阅规则自动填充完成：{subscribe.name} → {update_dict}")
+                except Exception as e2:
+                    logger.error(f"新订阅规则自动填充失败：{e2}")
 
         except Exception as e:
             logger.error(f"SubscribeAdded 兜底失败：{e}")
@@ -902,6 +939,9 @@ class P115StrgmSub(_PluginBase):
             self._cloud_tv_remote_dir = str(config.get("cloud_tv_remote_dir", "") or "")
             self._cloud_movie_local_dir = str(config.get("cloud_movie_local_dir", "") or "")
             self._cloud_movie_remote_dir = str(config.get("cloud_movie_remote_dir", "") or "")
+            self._subscribe_auto_fill = bool(config.get("subscribe_auto_fill", True))
+            self._subscribe_tv_rule_group = str(config.get("subscribe_tv_rule_group", "电视剧非杜比含VIVID") or "")
+            self._subscribe_movie_rule_group = str(config.get("subscribe_movie_rule_group", "电影非杜比") or "")
             # 帧率/比特率评分规则
             _fp = config.get("frame_rate_pattern", None)
             if _fp:
@@ -1500,6 +1540,9 @@ class P115StrgmSub(_PluginBase):
             "frame_rate_pattern": self._frame_rate_pattern,
             "bit_rate_pattern": self._bit_rate_pattern,
             "vivid_pattern": self._vivid_pattern,
+            "subscribe_auto_fill": self._subscribe_auto_fill,
+            "subscribe_tv_rule_group": self._subscribe_tv_rule_group,
+            "subscribe_movie_rule_group": self._subscribe_movie_rule_group,
         })
 
     # ------------------ stop ------------------
