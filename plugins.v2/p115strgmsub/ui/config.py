@@ -389,18 +389,67 @@ class UIConfig:
                         'content': [{
                             'component': 'VCol',
                             'props': {'cols': 12},
-                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '规则自动填充（内置 SubscribeGroup）：新增订阅时自动填充过滤规则组、打开原生洗版、叠加 DoVi 排除规则。需配合下方「MP过滤规则管理」使用（VIVID/10BIT/60FPS自定义规则 + 4套预设规则组）。'}}]
+                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': '规则自动填充（内置 SubscribeGroup）：新增订阅时自动填充过滤规则组。可按二级分类选择规则组，无匹配时用通用规则组兜底。'}}]
                         }]
                     },
                     {
                         'component': 'VRow',
                         'content': [
-                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
-                             'content': [{'component': 'VSwitch', 'props': {'model': 'subscribe_auto_fill', 'label': '启用规则自动填充', 'hint': '新增订阅时自动填充过滤规则组和开启洗版'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 2},
+                             'content': [{'component': 'VSwitch', 'props': {'model': 'subscribe_auto_fill', 'label': '启用', 'hint': '新增订阅时自动填充过滤规则组'}}]},
+                            {'component': 'VCol', 'props': {'cols': 12, 'md': 5},
+                             'content': [{'component': 'VSelect', 'props': {
+                                 'model': 'subscribe_category_rules',
+                                 'label': '二级分类规则映射（多选，按序匹配）',
+                                 'items': [
+                                     {'title': '国产剧 → 电视剧非杜比画质优先', 'value': '国产剧#电视剧非杜比画质优先'},
+                                     {'title': '国产剧 → 电视剧杜比画质优先', 'value': '国产剧#电视剧杜比画质优先'},
+                                     {'title': '美剧 → 电视剧非杜比画质优先', 'value': '美剧#电视剧非杜比画质优先'},
+                                     {'title': '美剧 → 电视剧杜比画质优先', 'value': '美剧#电视剧杜比画质优先'},
+                                     {'title': '动漫 → 电视剧非杜比画质优先', 'value': '动漫#电视剧非杜比画质优先'},
+                                     {'title': '动漫 → 电视剧杜比画质优先', 'value': '动漫#电视剧杜比画质优先'},
+                                     {'title': '华语电影 → 电影非杜比画质优先', 'value': '华语电影#电影非杜比画质优先'},
+                                     {'title': '华语电影 → 电影含杜比画质优先', 'value': '华语电影#电影含杜比画质优先'},
+                                     {'title': '外语电影 → 电影非杜比画质优先', 'value': '外语电影#电影非杜比画质优先'},
+                                     {'title': '外语电影 → 电影含杜比画质优先', 'value': '外语电影#电影含杜比画质优先'},
+                                 ],
+                                 'multiple': True,
+                                 'chips': True,
+                                 'clearable': True,
+                                 'closable-chips': True,
+                                 'hint': '选中的映射项会应用于对应二级分类的订阅。同分类同名多项时，按选中先后顺序匹配。未匹配的分类走下方兜底规则组。',
+                                 'persistent-hint': True
+                             }}]},
+                        ]
+                    },
+                    # 通用规则组兜底
+                    {
+                        'component': 'VRow',
+                        'content': [
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VTextField', 'props': {'model': 'subscribe_tv_rule_group', 'label': '电视剧规则组', 'placeholder': '电视剧非杜比画质优先', 'hint': '新增电视剧订阅时填充的规则组名称', 'clearable': True, 'persistent-hint': True}}]},
+                             'content': [{'component': 'VSelect', 'props': {
+                                 'model': 'subscribe_tv_rule_group',
+                                 'label': '电视剧兜底规则组',
+                                 'items': [
+                                     {'title': '电视剧非杜比画质优先', 'value': '电视剧非杜比画质优先'},
+                                     {'title': '电视剧杜比画质优先', 'value': '电视剧杜比画质优先'},
+                                 ],
+                                 'clearable': True,
+                                 'hint': '未匹配到二级分类规则时，电视剧的兜底规则组',
+                                 'persistent-hint': True
+                             }}]},
                             {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                             'content': [{'component': 'VTextField', 'props': {'model': 'subscribe_movie_rule_group', 'label': '电影规则组', 'placeholder': '电影非杜比画质优先', 'hint': '新增电影订阅时填充的规则组名称', 'clearable': True, 'persistent-hint': True}}]},
+                             'content': [{'component': 'VSelect', 'props': {
+                                 'model': 'subscribe_movie_rule_group',
+                                 'label': '电影兜底规则组',
+                                 'items': [
+                                     {'title': '电影非杜比画质优先', 'value': '电影非杜比画质优先'},
+                                     {'title': '电影含杜比画质优先', 'value': '电影含杜比画质优先'},
+                                 ],
+                                 'clearable': True,
+                                 'hint': '未匹配到二级分类规则时，电影的兜底规则组',
+                                 'persistent-hint': True
+                             }}]},
                         ]
                     },
                     # 洗版模块（可折叠）

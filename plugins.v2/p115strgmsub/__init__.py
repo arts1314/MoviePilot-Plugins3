@@ -43,7 +43,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.3"
+    plugin_version = "1.6.4"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -135,6 +135,9 @@ class P115StrgmSub(_PluginBase):
     _global_exclude: str = r"DoVi|Dolby[\s.]?Vision|DOVI|杜比视界"
     _subscribe_auto_fill: bool = True
     # 新增订阅时自动填充的规则组（内置SubscribeGroup功能）
+    # 按二级分类配置（VSelect多选格式：category#rule_group）
+    _subscribe_category_rules: list = []
+    # 通用兜底规则组（分类未匹配时使用）
     _subscribe_tv_rule_group: str = "电视剧非杜比画质优先"
     _subscribe_movie_rule_group: str = "电影非杜比画质优先"
     _auto_register_rules: bool = True
@@ -664,15 +667,28 @@ class P115StrgmSub(_PluginBase):
                         if subscribe:
                             update_dict = {}
                             is_tv = subscribe.type == MediaType.TV.value
+                            category = getattr(subscribe, 'media_category', None) or ''
 
-                            # 根据媒体类型选择规则组
-                            if is_tv and self._subscribe_tv_rule_group:
-                                update_dict["filter_groups"] = [self._subscribe_tv_rule_group]
-                                update_dict["best_version"] = 1
-                                logger.info(f"新增订阅 {subscribe.name}：电视剧→规则组「{self._subscribe_tv_rule_group}」+ 开启洗版")
-                            elif not is_tv and self._subscribe_movie_rule_group:
-                                update_dict["filter_groups"] = [self._subscribe_movie_rule_group]
-                                logger.info(f"新增订阅 {subscribe.name}：电影→规则组「{self._subscribe_movie_rule_group}」")
+                            # 先尝试匹配二级分类规则
+                            matched_rule_group = None
+                            if category:
+                                cat_rules = self._parse_category_rules()
+                                if category in cat_rules:
+                                    matched_rule_group = cat_rules[category]
+                                    logger.info(f"新增订阅 {subscribe.name}：二级分类「{category}」→ 规则组「{matched_rule_group}」")
+
+                            # 未匹配到分类规则时，用通用兜底
+                            if not matched_rule_group:
+                                if is_tv and self._subscribe_tv_rule_group:
+                                    matched_rule_group = self._subscribe_tv_rule_group
+                                    update_dict["best_version"] = 1
+                                    logger.info(f"新增订阅 {subscribe.name}：电视剧兜底→规则组「{matched_rule_group}」+ 开启洗版")
+                                elif not is_tv and self._subscribe_movie_rule_group:
+                                    matched_rule_group = self._subscribe_movie_rule_group
+                                    logger.info(f"新增订阅 {subscribe.name}：电影兜底→规则组「{matched_rule_group}」")
+
+                            if matched_rule_group:
+                                update_dict["filter_groups"] = [matched_rule_group]
 
                             # 叠加全局 exclude（DoVi 硬拒绝）
                             global_exclude = getattr(self, '_global_exclude_pattern', None) or self._global_exclude
@@ -940,6 +956,7 @@ class P115StrgmSub(_PluginBase):
             self._cloud_movie_local_dir = str(config.get("cloud_movie_local_dir", "") or "")
             self._cloud_movie_remote_dir = str(config.get("cloud_movie_remote_dir", "") or "")
             self._subscribe_auto_fill = bool(config.get("subscribe_auto_fill", True))
+            self._subscribe_category_rules = config.get("subscribe_category_rules", []) or []
             self._subscribe_tv_rule_group = str(config.get("subscribe_tv_rule_group", "电视剧非杜比画质优先") or "")
             self._subscribe_movie_rule_group = str(config.get("subscribe_movie_rule_group", "电影非杜比画质优先") or "")
             # 帧率/比特率评分规则
@@ -1014,6 +1031,28 @@ class P115StrgmSub(_PluginBase):
             if self._onlyonce:
                 self._onlyonce = False
                 self.__update_config()
+
+    def _parse_category_rules(self) -> dict:
+        """
+        解析二级分类规则映射。
+        输入：['国产剧#电视剧非杜比画质优先', '美剧#电视剧杜比画质优先', ...]
+        输出：{'国产剧': '电视剧非杜比画质优先', '美剧': '电视剧杜比画质优先', ...}
+        同分类多条时，只保留最后一条（便于覆盖）。
+        """
+        result = {}
+        raw = self._subscribe_category_rules or []
+        if isinstance(raw, str):
+            # 兼容旧版字符串格式
+            return result
+        for item in raw:
+            if not item or '#' not in item:
+                continue
+            parts = item.split('#', 1)
+            category = parts[0].strip()
+            rule_group = parts[1].strip()
+            if category and rule_group:
+                result[category] = rule_group
+        return result
 
     def _register_filter_rules(self):
         """
@@ -1541,6 +1580,7 @@ class P115StrgmSub(_PluginBase):
             "bit_rate_pattern": self._bit_rate_pattern,
             "vivid_pattern": self._vivid_pattern,
             "subscribe_auto_fill": self._subscribe_auto_fill,
+            "subscribe_category_rules": self._subscribe_category_rules,
             "subscribe_tv_rule_group": self._subscribe_tv_rule_group,
             "subscribe_movie_rule_group": self._subscribe_movie_rule_group,
         })
