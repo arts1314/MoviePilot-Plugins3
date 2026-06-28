@@ -43,7 +43,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.5"
+    plugin_version = "1.6.6"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -139,7 +139,7 @@ class P115StrgmSub(_PluginBase):
     # 通用兜底规则组（分类未匹配时使用）
     _subscribe_tv_rule_group: str = "电视剧非杜比画质优先"
     _subscribe_movie_rule_group: str = "电影非杜比画质优先"
-    _auto_register_rules: bool = True
+    _auto_register_rules: bool = False
     # 优先级规则组预设（none=保留用户现有, no_dovi=非杜比画质优先, dovi=含杜比, custom=自定义）
     _tv_rule_group_preset: str = "none"
     _tv_rule_group_custom: str = ""
@@ -974,7 +974,7 @@ class P115StrgmSub(_PluginBase):
             _vp = config.get("vivid_pattern", None)
             if _vp:
                 self._vivid_pattern = str(_vp)
-            self._auto_register_rules = bool(config.get("auto_register_rules", True))
+            self._auto_register_rules = bool(config.get("auto_register_rules", False))
             self._tv_rule_group_preset = str(config.get("tv_rule_group_preset", "none") or "none")
             self._tv_rule_group_custom = str(config.get("tv_rule_group_custom", "") or "")
             self._movie_rule_group_preset = str(config.get("movie_rule_group_preset", "none") or "none")

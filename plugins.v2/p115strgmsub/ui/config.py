@@ -607,8 +607,8 @@ class UIConfig:
                                                     'variant': 'tonal',
                                                     'text': 'MP过滤规则管理：向MP系统注册VIVID/10BIT/60FPS三条自定义规则，'
                                                             '让订阅优先级规则组中可以正常使用 Vivid、10bit、60FPS 等规则ID。'
-                                                             '同时自动应用下方选择的优先级规则组预设。'
-                                                             '保存配置即自动应用，也可在插件页面手动触发。'
+                                                            '同时自动应用下方选择的优先级规则组预设。'
+                                                            '保存配置即自动应用，也可在插件页面手动触发。'
                                                 }
                                             }]
                                         }]
@@ -622,8 +622,8 @@ class UIConfig:
                                                 'component': 'VSwitch',
                                                 'props': {
                                                     'model': 'auto_register_rules',
-                                                    'label': '自动注册自定义过滤规则到MP',
-                                                    'hint': '关闭后，插件不再自动向MP系统注册VIVID/10BIT/60FPS规则。已注册的规则会保留，但下次加载时不会更新。',
+                                                    'label': '注册自定义规则+预设规则组到MP',
+                                                    'hint': '开启后，插件向MP注册VIVID/10BIT/60FPS自定义规则，并自动应用所选优先级规则组预设。关闭则不动MP原有规则。默认关闭，按需开启。',
                                                     'persistent-hint': True
                                                 }
                                             }]
@@ -795,7 +795,7 @@ class UIConfig:
             "frame_rate_pattern": r"60fps|120fps|50fps|60帧|120帧|50帧",
             "bit_rate_pattern": r"10bit|12bit|10-bit|12-bit",
             "vivid_pattern": r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid",
-            "auto_register_rules": True,
+            "auto_register_rules": False,
             "tv_rule_group_preset": "none",
             "tv_rule_group_custom": "",
             "movie_rule_group_preset": "none",
