@@ -975,6 +975,11 @@ class P115StrgmSub(_PluginBase):
             if _vp:
                 self._vivid_pattern = str(_vp)
             self._auto_register_rules = bool(config.get("auto_register_rules", False))
+            # v1.6.6 升级强制关闭并写库：之前版本默认True已写入数据库
+            if self._auto_register_rules:
+                self._auto_register_rules = False
+                self.update_config({"auto_register_rules": False})
+                logger.info("v1.6.6 升级：auto_register_rules 已强制关闭并写入数据库")
             self._tv_rule_group_preset = str(config.get("tv_rule_group_preset", "none") or "none")
             self._tv_rule_group_custom = str(config.get("tv_rule_group_custom", "") or "")
             self._movie_rule_group_preset = str(config.get("movie_rule_group_preset", "none") or "none")
