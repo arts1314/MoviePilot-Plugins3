@@ -607,8 +607,24 @@ class UIConfig:
                                                     'variant': 'tonal',
                                                     'text': 'MP过滤规则管理：向MP系统注册VIVID/10BIT/60FPS三条自定义规则，'
                                                             '让订阅优先级规则组中可以正常使用 Vivid、10bit、60FPS 等规则ID。'
-                                                            '同时自动应用下方选择的优先级规则组预设。'
-                                                            '保存配置即自动应用，也可在插件页面手动触发。'
+                                                             '同时自动应用下方选择的优先级规则组预设。'
+                                                             '保存配置即自动应用，也可在插件页面手动触发。'
+                                                }
+                                            }]
+                                        }]
+                                    },
+                                    {
+                                        'component': 'VRow',
+                                        'content': [{
+                                            'component': 'VCol',
+                                            'props': {'cols': 12},
+                                            'content': [{
+                                                'component': 'VSwitch',
+                                                'props': {
+                                                    'model': 'auto_register_rules',
+                                                    'label': '自动注册自定义过滤规则到MP',
+                                                    'hint': '关闭后，插件不再自动向MP系统注册VIVID/10BIT/60FPS规则。已注册的规则会保留，但下次加载时不会更新。',
+                                                    'persistent-hint': True
                                                 }
                                             }]
                                         }]
