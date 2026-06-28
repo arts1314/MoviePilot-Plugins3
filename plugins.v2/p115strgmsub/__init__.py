@@ -770,10 +770,7 @@ class P115StrgmSub(_PluginBase):
         if not event_data:
             return
 
-        # 仅拦截 PT 订阅下载
-        if event_data.origin != 'Subscribe':
-            return
-
+        # 拦截所有下载（PT/RSS/刷流等），评分不如现有 strm 就取消
         context = event_data.context
         if not context:
             return
