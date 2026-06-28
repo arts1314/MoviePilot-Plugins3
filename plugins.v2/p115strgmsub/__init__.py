@@ -170,6 +170,20 @@ class P115StrgmSub(_PluginBase):
     _sync_handler: Optional[SyncHandler] = None
     _api_handler: Optional[ApiHandler] = None
 
+    @staticmethod
+    def _apply_http_patches():
+        """自动部署 115 API 重试补丁（WAF 405 + ConnectionReset 指数退避）"""
+        try:
+            from .patches import p115client_patch
+            p115client_patch.apply()
+            from .patches import httpcore_405_patch
+            httpcore_405_patch.apply()
+            from .patches import httpx_405_patch
+            httpx_405_patch.apply()
+            logger.info("✅ 115 API 重试补丁全部加载成功")
+        except Exception as e:
+            logger.warning(f"⚠️ 115 API 重试补丁加载失败: {e}")
+
     # ------------------ cron 合法性校验（轻量版,不卡 8 小时间隔） ------------------
 
     @staticmethod
@@ -865,6 +879,7 @@ class P115StrgmSub(_PluginBase):
     def init_plugin(self, config: dict = None):
         self.stop_service()
         download_so_file(Path(__file__).parent / "lib")
+        self._apply_http_patches()
 
         if config:
             self._enabled = config.get("enabled", False)
