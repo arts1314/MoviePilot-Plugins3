@@ -2083,22 +2083,25 @@ class P115StrgmSub(_PluginBase):
     def api_batch_re_score(self) -> dict:
         """API: 整理记录评分 - 调用内部 _batch_re_score()"""
         return self._batch_re_score()
+
     def _force_re_score(self) -> dict:
         """
-        强制重评分：清空 episode_priority 缓存，重新扫描磁盘 strm 文件评分并覆盖旧评分。
+        强制重评分：清空 episode_priority 缓存，重新评分并覆盖旧数据。
+        从转存记录读取实际115网盘文件大小用于75%体积评分。
         同时清理无对应 strm 文件的脏数据。
         :return: {"success": bool, "message": str, "results": [str, ...]}
         """
         import os
         import re
         import json
-        import glob
         from app.db import SessionFactory
         from app.db.subscribe_oper import SubscribeOper
+        from app.db.transferhistory_oper import TransferHistoryOper
         from app.schemas.types import MediaType
         from app.schemas import TorrentInfo
         from app.core.context import MediaInfo
         from app.modules.filter import FilterModule
+        from sqlalchemy import text
 
         subscribe_ids = self._upgrade_subscribe_ids
         if not subscribe_ids:
@@ -2126,54 +2129,106 @@ class P115StrgmSub(_PluginBase):
                 season = sub.season or 1
                 sub_name = f"{sub.name} S{season:02d}"
 
-                # 扫描磁盘 strm 文件
-                # 目录格式: /media/{type}/{name} (year) {{tmdbid=xxx}}/Season {season}/*.strm
-                media_base = "/media"
-                strm_files = []
-                for root, dirs, files in os.walk(media_base):
-                    for f in files:
-                        if f.endswith('.strm'):
-                            strm_files.append(os.path.join(root, f))
+                # =========================================================
+                # 1. 从转存记录收集实际文件信息
+                # =========================================================
+                records = []
+                with SessionFactory() as db:
+                    try:
+                        th_oper = TransferHistoryOper(db=db)
+                        raw = th_oper.list_by_tmdbid(tmdbid) if hasattr(th_oper, 'list_by_tmdbid') else []
+                        records = list(raw) if raw else []
+                    except Exception:
+                        pass
+                    if not records:
+                        rows = db.execute(
+                            text("SELECT * FROM transferhistory WHERE tmdbid = :t ORDER BY id DESC LIMIT 100"),
+                            {"t": tmdbid}
+                        ).fetchall()
+                        if rows:
+                            col_names = [d[0] for d in db.execute(text("PRAGMA table_info(transferhistory)")).fetchall()]
+                            for row in rows:
+                                records.append(dict(zip(col_names, row)))
 
-                # 过滤属于该订阅的 strm 文件
-                match_patterns = [
-                    f"tmdbid={tmdbid}",
-                    sub.name,
-                    f"S{season:02d}",
-                    f"S{season:02d}E"
-                ]
+                # 按剧集整理实际文件信息 {ep: {name, size, filename}}
+                ep_fileinfo = {}
+                for rec in records:
+                    ep_str = getattr(rec, 'episodes', None) if not isinstance(rec, dict) else rec.get('episodes')
+                    sfi_raw = getattr(rec, 'src_fileitem', None) if not isinstance(rec, dict) else rec.get('src_fileitem')
+                    if not ep_str or not sfi_raw:
+                        continue
+                    src_data = {}
+                    if isinstance(sfi_raw, str):
+                        try:
+                            src_data = json.loads(sfi_raw)
+                        except Exception:
+                            continue
+                    elif isinstance(sfi_raw, dict):
+                        src_data = sfi_raw
+                    else:
+                        continue
+                    fsize = int(src_data.get("size", 0))
+                    fname = src_data.get("name", src_data.get("basename", ""))
+                    if not fname or not fsize:
+                        continue
+                    ep_match = re.search(rf'S{season:02d}E(\d+)', fname, re.IGNORECASE)
+                    if not ep_match:
+                        ep_match = re.search(rf'S0*?E(\d+)', ep_str) if ep_str else None
+                    if ep_match:
+                        ep_num = ep_match.group(1)
+                        if ep_num not in ep_fileinfo or fsize > ep_fileinfo[ep_num]['size']:
+                            ep_fileinfo[ep_num] = {"name": fname, "size": fsize, "filename": fname}
 
-                sub_strms = []
-                for sf in strm_files:
-                    rel = sf.replace(media_base, "")
-                    # 必须包含 tmdbid 或订阅名
-                    if f"tmdbid={tmdbid}" in rel or sub.name in rel:
-                        # 提取集号
-                        ep_match = re.search(rf'S{season:02d}E(\d+)', rel, re.IGNORECASE)
-                        if ep_match:
-                            ep_num = int(ep_match.group(1))
-                            filesize = os.path.getsize(sf) if os.path.exists(sf) else 0
-                            basename = os.path.basename(sf)
-                            sub_strms.append((ep_num, basename, filesize, sf))
-
-                if not sub_strms:
-                    results.append(f"{sub_name}: 未找到磁盘 strm 文件")
+                if not ep_fileinfo:
+                    results.append(f"{sub_name}: 未找到转存记录，请先确保已转存过文件")
                     continue
 
-                # 对每个 strm 文件评分
+                # =========================================================
+                # 2. 扫描磁盘 strm 文件，确认哪些集还存在
+                # =========================================================
+                existing_eps = set()
+                media_base = "/media"
+                found = False
+                for root, dirs, files in os.walk(media_base):
+                    for f in files:
+                        if not f.endswith('.strm'):
+                            continue
+                        rel = os.path.join(root, f).replace(media_base, "")
+                        if f"tmdbid={tmdbid}" not in rel and sub.name not in rel:
+                            continue
+                        ep_match = re.search(rf'S{season:02d}E(\d+)', rel, re.IGNORECASE)
+                        if ep_match:
+                            existing_eps.add(ep_match.group(1))
+                            found = True
+
+                if not existing_eps:
+                    results.append(f"{sub_name}: 磁盘未找到 strm 文件，跳过")
+                    continue
+
+                # =========================================================
+                # 3. 评分：只用转存记录中的实际文件大小
+                # =========================================================
                 new_scores = {}
                 rule_group_names = getattr(sub, 'filter_groups', None) or []
                 if not rule_group_names:
                     from app.db.systemconfig_oper import SystemConfigOper, SystemConfigKey
                     rule_group_names = SystemConfigOper().get(SystemConfigKey.BestVersionFilterRuleGroups) or []
 
-                for ep_num, filename, filesize, fullpath in sub_strms:
-                    ep_key = str(ep_num)
+                fallback_rules = rule_group_names  # for logging
+
+                for ep_key in sorted(existing_eps, key=int):
+                    info = ep_fileinfo.get(ep_key)
+                    if not info:
+                        continue  # 有 strm 但没转存记录？跳过该集
+
+                    fsize = info["size"]
+                    fname = info["filename"]
+
                     try:
                         fake_mediainfo = MediaInfo(type=MediaType.TV)
                         fake_torrent = TorrentInfo(
-                            title=filename,
-                            size=filesize or 0,
+                            title=fname,
+                            size=fsize or 0,
                             description='',
                             labels=[]
                         )
@@ -2185,64 +2240,68 @@ class P115StrgmSub(_PluginBase):
                             mediainfo=fake_mediainfo
                         )
                         if matched:
-                            score = matched[0].pri_order
-                            if score is None or score < 60:
-                                score = 60
+                            rule_score = matched[0].pri_order or 60
+                            if rule_score < 60:
+                                rule_score = 60
                         else:
-                            score = 60
+                            rule_score = 60
                     except Exception as e:
                         logger.warning(f"[强制重评分] 规则组评分失败（回退基础分）: {e}")
-                        score = 40
-                        if re.search(r'2160p|4K|UHD', filename, re.IGNORECASE):
-                            score += 20
-                        elif re.search(r'1080p', filename, re.IGNORECASE):
-                            score += 10
-                        if re.search(r'HDR|DV|DoVi|Dolby', filename, re.IGNORECASE):
-                            score += 15
-                        if re.search(r'H265|HEVC|x265|H\\.265', filename, re.IGNORECASE):
-                            score += 10
-                        size_gb = filesize / (1024**3) if filesize else 0
-                        if size_gb >= 5:
-                            score += 15
-                        elif size_gb >= 3:
-                            score += 12
-                        elif size_gb >= 2:
-                            score += 8
-                        elif size_gb >= 1:
-                            score += 5
-                        score = min(score, 100)
+                        rule_score = 40
+                        if re.search(r'2160p|4K|UHD', fname, re.IGNORECASE):
+                            rule_score += 20
+                        elif re.search(r'1080p', fname, re.IGNORECASE):
+                            rule_score += 10
+                        if re.search(r'HDR|DV|DoVi|Dolby', fname, re.IGNORECASE):
+                            rule_score += 15
+                        if re.search(r'H265|HEVC|x265|H\\.265', fname, re.IGNORECASE):
+                            rule_score += 10
+                        rule_score = min(rule_score, 100)
 
-                    # 只保留最高分（同集多个 strm 的情况）
-                    if ep_key not in new_scores or score > new_scores[ep_key]:
-                        new_scores[ep_key] = score
+                    # 综合评分：75%体积 + 25%画质
+                    # 用 SyncHandler._calc_size_score 同款逻辑简化版
+                    size_gb = fsize / (1024**3)
+                    if size_gb >= 5:
+                        size_score = 100
+                    elif size_gb >= 3:
+                        size_score = 80
+                    elif size_gb >= 2:
+                        size_score = 60
+                    elif size_gb >= 1:
+                        size_score = 40
+                    else:
+                        size_score = 20
+
+                    normalized_rule = min(rule_score, 100)
+                    final_score = int(size_score * 0.75 + normalized_rule * 0.25)
+                    final_score = max(final_score, 60)  # 保底60分
+
+                    new_scores[ep_key] = final_score
+                    logger.debug(f"[强制重评分] {sub_name} E{ep_key}: 体积{size_gb:.1f}GB→{size_score}分×75% + 画质{rule_score}分×25% = {final_score}分")
 
                 if not new_scores:
-                    results.append(f"{sub_name}: 未能从 strm 文件解析到评分")
+                    results.append(f"{sub_name}: 未能从转存记录解析到可评分的集")
                     continue
 
-                # ★ 强制覆盖：读取旧的 episode_priority，清理脏数据
+                # =========================================================
+                # 4. 清理脏数据 + 写入新评分（强制覆盖）
+                # =========================================================
                 old_raw = getattr(sub, 'episode_priority', None)
                 cleaned_eps = []
-                if isinstance(old_raw, str):
+                if isinstance(old_raw, (str, dict)):
                     try:
-                        old_data = json.loads(old_raw)
+                        old_data = json.loads(old_raw) if isinstance(old_raw, str) else old_raw
                         if isinstance(old_data, dict):
                             for ek in old_data:
                                 if ek not in new_scores:
                                     cleaned_eps.append(ek)
                     except Exception:
                         pass
-                elif isinstance(old_raw, dict):
-                    for ek in old_raw:
-                        if ek not in new_scores:
-                            cleaned_eps.append(ek)
 
-                # 写入新评分（强制覆盖）
                 SubscribeOper().update(sub.id, {"episode_priority": new_scores})
                 total_updated += len(new_scores)
                 total_cleaned += len(cleaned_eps)
 
-                # 构建结果
                 ep_list = sorted(new_scores.keys(), key=int)
                 score_detail = ", ".join([f"E{e}={new_scores[e]}分" for e in ep_list[:15]])
                 if len(ep_list) > 15:
@@ -2269,6 +2328,7 @@ class P115StrgmSub(_PluginBase):
     def api_force_re_score(self) -> dict:
         """API: 强制重评分 - 调用内部 _force_re_score()"""
         return self._force_re_score()
+
 
     def _apply_global_config_once(self):
         """安装确认后首次执行时，应用一次系统级配置。
