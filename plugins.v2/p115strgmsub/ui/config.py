@@ -729,6 +729,64 @@ class UIConfig:
             }
         ]
 
+            }
+        ]
+
+        # ---- 评分工具按钮 ----
+        form_schema.append({
+            'component': 'VCard',
+            'props': {'variant': 'outlined', 'class': 'mt-4'},
+            'content': [{
+                'component': 'VRow',
+                'props': {'class': 'mt-2'},
+                'content': [
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 6, 'class': 'text-center'},
+                        'content': [{
+                            'component': 'VBtn',
+                            'props': {'color': 'primary', 'variant': 'outlined', 'size': 'small', 'prepend-icon': 'mdi-refresh'},
+                            'text': '整理记录评分（合并）',
+                            'events': {
+                                'click': {
+                                    'api': f'/plugin/P115StrgmSub/batch_re_score?apikey={settings.API_TOKEN}',
+                                    'method': 'post'
+                                }
+                            }
+                        }]
+                    },
+                    {
+                        'component': 'VCol',
+                        'props': {'cols': 6, 'class': 'text-center'},
+                        'content': [{
+                            'component': 'VBtn',
+                            'props': {'color': 'warning', 'variant': 'outlined', 'size': 'small', 'prepend-icon': 'mdi-delete-restore'},
+                            'text': '强制重评分（覆盖+清理脏数据）',
+                            'events': {
+                                'click': {
+                                    'api': f'/plugin/P115StrgmSub/force_re_score?apikey={settings.API_TOKEN}',
+                                    'method': 'post'
+                                }
+                            }
+                        }]
+                    }
+                ]
+            },
+            {
+                'component': 'VRow',
+                'props': {'class': 'mt-2'},
+                'content': [{
+                    'component': 'VCol',
+                    'props': {'cols': 12'},
+                    'content': [{
+                        'component': 'VAlert',
+                        'props': {'type': 'info', 'variant': 'tonal',
+                                 'text': '「整理记录评分」基于转存记录评分并合并现有数据；「强制重评分」清空旧评分，重新扫描磁盘strm文件打分并覆盖，同时清理无效脏数据。'}
+                    }]
+                }]
+            }]
+        })
+
         default_config = {
             "enabled": False,
             "notify": True,

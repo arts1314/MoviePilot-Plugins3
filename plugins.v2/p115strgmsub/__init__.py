@@ -37,13 +37,13 @@ class P115StrgmSub(_PluginBase):
     """115网盘订阅追更插件"""
 
     # 插件名称
-    plugin_name = "115网盘订阅追更魔改版v1.6.9"
+    plugin_name = "115网盘订阅追更魔改版v1.6.91"
     # 插件描述
     plugin_desc = "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.9"
+    plugin_version = "1.6.91"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -1636,6 +1636,12 @@ class P115StrgmSub(_PluginBase):
                 "endpoint": self.api_batch_re_score,
                 "methods": ["POST"],
                 "summary": "整理记录评分：对已选订阅已有strm批量评分写入episode_priority"
+            },
+            {
+                "path": "/force_re_score",
+                "endpoint": self.api_force_re_score,
+                "methods": ["POST"],
+                "summary": "强制重评分：清空episode_priority缓存，重新扫描磁盘strm文件评分（覆盖旧评分）"
             }
         ]
     
@@ -2077,6 +2083,192 @@ class P115StrgmSub(_PluginBase):
     def api_batch_re_score(self) -> dict:
         """API: 整理记录评分 - 调用内部 _batch_re_score()"""
         return self._batch_re_score()
+    def _force_re_score(self) -> dict:
+        """
+        强制重评分：清空 episode_priority 缓存，重新扫描磁盘 strm 文件评分并覆盖旧评分。
+        同时清理无对应 strm 文件的脏数据。
+        :return: {"success": bool, "message": str, "results": [str, ...]}
+        """
+        import os
+        import re
+        import json
+        import glob
+        from app.db import SessionFactory
+        from app.db.subscribe_oper import SubscribeOper
+        from app.schemas.types import MediaType
+        from app.schemas import TorrentInfo
+        from app.core.context import MediaInfo
+        from app.modules.filter import FilterModule
+
+        subscribe_ids = self._upgrade_subscribe_ids
+        if not subscribe_ids:
+            msg = "未选择任何订阅，请先在「单独开启洗版的订阅」中选择要评分的订阅"
+            logger.info(f"[强制重评分] {msg}")
+            return {"success": False, "message": msg, "results": [msg]}
+
+        with SessionFactory() as db:
+            oper = SubscribeOper(db=db)
+            all_subs = oper.list() or []
+
+        target_subs = [s for s in all_subs if s.id in subscribe_ids and s.type == MediaType.TV.value]
+        if not target_subs:
+            msg = "选择的订阅中没有电视剧订阅"
+            logger.info(f"[强制重评分] {msg}")
+            return {"success": False, "message": msg, "results": [msg]}
+
+        results = []
+        total_updated = 0
+        total_cleaned = 0
+
+        for sub in target_subs:
+            try:
+                tmdbid = getattr(sub, 'tmdbid', None)
+                season = sub.season or 1
+                sub_name = f"{sub.name} S{season:02d}"
+
+                # 扫描磁盘 strm 文件
+                # 目录格式: /media/{type}/{name} (year) {{tmdbid=xxx}}/Season {season}/*.strm
+                media_base = "/media"
+                strm_files = []
+                for root, dirs, files in os.walk(media_base):
+                    for f in files:
+                        if f.endswith('.strm'):
+                            strm_files.append(os.path.join(root, f))
+
+                # 过滤属于该订阅的 strm 文件
+                match_patterns = [
+                    f"tmdbid={tmdbid}",
+                    sub.name,
+                    f"S{season:02d}",
+                    f"S{season:02d}E"
+                ]
+
+                sub_strms = []
+                for sf in strm_files:
+                    rel = sf.replace(media_base, "")
+                    # 必须包含 tmdbid 或订阅名
+                    if f"tmdbid={tmdbid}" in rel or sub.name in rel:
+                        # 提取集号
+                        ep_match = re.search(rf'S{season:02d}E(\d+)', rel, re.IGNORECASE)
+                        if ep_match:
+                            ep_num = int(ep_match.group(1))
+                            filesize = os.path.getsize(sf) if os.path.exists(sf) else 0
+                            basename = os.path.basename(sf)
+                            sub_strms.append((ep_num, basename, filesize, sf))
+
+                if not sub_strms:
+                    results.append(f"{sub_name}: 未找到磁盘 strm 文件")
+                    continue
+
+                # 对每个 strm 文件评分
+                new_scores = {}
+                rule_group_names = getattr(sub, 'filter_groups', None) or []
+                if not rule_group_names:
+                    from app.db.systemconfig_oper import SystemConfigOper, SystemConfigKey
+                    rule_group_names = SystemConfigOper().get(SystemConfigKey.BestVersionFilterRuleGroups) or []
+
+                for ep_num, filename, filesize, fullpath in sub_strms:
+                    ep_key = str(ep_num)
+                    try:
+                        fake_mediainfo = MediaInfo(type=MediaType.TV)
+                        fake_torrent = TorrentInfo(
+                            title=filename,
+                            size=filesize or 0,
+                            description='',
+                            labels=[]
+                        )
+                        filter_module = FilterModule()
+                        filter_module.init_module()
+                        matched = filter_module.filter_torrents(
+                            rule_groups=rule_group_names,
+                            torrent_list=[fake_torrent],
+                            mediainfo=fake_mediainfo
+                        )
+                        if matched:
+                            score = matched[0].pri_order
+                            if score is None or score < 60:
+                                score = 60
+                        else:
+                            score = 60
+                    except Exception as e:
+                        logger.warning(f"[强制重评分] 规则组评分失败（回退基础分）: {e}")
+                        score = 40
+                        if re.search(r'2160p|4K|UHD', filename, re.IGNORECASE):
+                            score += 20
+                        elif re.search(r'1080p', filename, re.IGNORECASE):
+                            score += 10
+                        if re.search(r'HDR|DV|DoVi|Dolby', filename, re.IGNORECASE):
+                            score += 15
+                        if re.search(r'H265|HEVC|x265|H\\.265', filename, re.IGNORECASE):
+                            score += 10
+                        size_gb = filesize / (1024**3) if filesize else 0
+                        if size_gb >= 5:
+                            score += 15
+                        elif size_gb >= 3:
+                            score += 12
+                        elif size_gb >= 2:
+                            score += 8
+                        elif size_gb >= 1:
+                            score += 5
+                        score = min(score, 100)
+
+                    # 只保留最高分（同集多个 strm 的情况）
+                    if ep_key not in new_scores or score > new_scores[ep_key]:
+                        new_scores[ep_key] = score
+
+                if not new_scores:
+                    results.append(f"{sub_name}: 未能从 strm 文件解析到评分")
+                    continue
+
+                # ★ 强制覆盖：读取旧的 episode_priority，清理脏数据
+                old_raw = getattr(sub, 'episode_priority', None)
+                cleaned_eps = []
+                if isinstance(old_raw, str):
+                    try:
+                        old_data = json.loads(old_raw)
+                        if isinstance(old_data, dict):
+                            for ek in old_data:
+                                if ek not in new_scores:
+                                    cleaned_eps.append(ek)
+                    except Exception:
+                        pass
+                elif isinstance(old_raw, dict):
+                    for ek in old_raw:
+                        if ek not in new_scores:
+                            cleaned_eps.append(ek)
+
+                # 写入新评分（强制覆盖）
+                SubscribeOper().update(sub.id, {"episode_priority": new_scores})
+                total_updated += len(new_scores)
+                total_cleaned += len(cleaned_eps)
+
+                # 构建结果
+                ep_list = sorted(new_scores.keys(), key=int)
+                score_detail = ", ".join([f"E{e}={new_scores[e]}分" for e in ep_list[:15]])
+                if len(ep_list) > 15:
+                    score_detail += f"... 共{len(ep_list)}集"
+                msg_parts = [f"{sub_name}: 已重评分{len(ep_list)}集 ({score_detail})"]
+                if cleaned_eps:
+                    msg_parts.append(f"清理了 {len(cleaned_eps)} 条脏数据: {', '.join(sorted(cleaned_eps, key=int))}")
+                results.append("; ".join(msg_parts))
+                logger.info(f"[强制重评分] {'; '.join(msg_parts)}")
+
+            except Exception as e:
+                results.append(f"{sub.name}: 出错 - {e}")
+                logger.error(f"[强制重评分] 出错 {sub.name}: {e}")
+
+        summary = f"处理了 {len(target_subs)} 个订阅，更新了 {total_updated} 集评分"
+        if total_cleaned > 0:
+            summary += f"，清理了 {total_cleaned} 条脏数据"
+        return {
+            "success": True,
+            "message": summary + "\n" + "\n".join(results),
+            "results": results
+        }
+
+    def api_force_re_score(self) -> dict:
+        """API: 强制重评分 - 调用内部 _force_re_score()"""
+        return self._force_re_score()
 
     def _apply_global_config_once(self):
         """安装确认后首次执行时，应用一次系统级配置。
