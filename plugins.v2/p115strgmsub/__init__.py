@@ -43,7 +43,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.96"
+    plugin_version = "1.6.97"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -852,38 +852,45 @@ class P115StrgmSub(_PluginBase):
 
         # 查找匹配的订阅
         from app.db.subscribe_oper import SubscribeOper
-        subscribe = None
+        all_subs = []
         for season in season_list:
-            subs = SubscribeOper().list_by_tmdbid(tmdbid, season)
-            for s in subs:
-                if s.type == MediaType.TV.value and bool(getattr(s, 'best_version', False)):
-                    subscribe = s
-                    break
-            if subscribe:
+            all_subs.extend(SubscribeOper().list_by_tmdbid(tmdbid, season))
+
+        if not all_subs:
+            return
+
+        # ── 仅115拦截：在所有匹配订阅中检查（不限 best_version） ──
+        for s in all_subs:
+            if s.type != MediaType.TV.value:
+                continue
+            sub_sites = getattr(s, 'sites', None) or []
+            if sub_sites == [-1]:
+                event_data.cancel = True
+                event_data.source = "P115StrgmSub-仅115拦截"
+                event_data.reason = f"订阅{s.name}仅限115网盘，拦截PT下载: {torrent.title}"
+                logger.info(
+                    f"[仅115拦截] ✅ 已拦截 {s.name} "
+                    f"({torrent.title}): sites=[-1]，拦截PT下载"
+                )
+                if self._notify:
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title="【仅115拦截】阻止PT下载",
+                        text=(
+                            f"{s.name} 的站点设置为仅115网盘，\n"
+                            f"已拦截来自PT的下载：{torrent.title}"
+                        )
+                    )
+                return
+
+        # ── 找 best_version=True 的订阅做评分拦截 ──
+        subscribe = None
+        for s in all_subs:
+            if s.type == MediaType.TV.value and bool(getattr(s, 'best_version', False)):
+                subscribe = s
                 break
 
         if not subscribe:
-            return
-
-        # ── 仅115拦截：订阅 sites=[-1] 时，拦截所有PT下载 ──
-        sub_sites = getattr(subscribe, 'sites', None) or []
-        if sub_sites == [-1]:
-            event_data.cancel = True
-            event_data.source = "P115StrgmSub-仅115拦截"
-            event_data.reason = f"订阅{subscribe.name}仅限115网盘，拦截PT下载: {torrent.title}"
-            logger.info(
-                f"[仅115拦截] ✅ 已拦截 {subscribe.name} "
-                f"({torrent.title}): sites=[-1]，拦截PT下载"
-            )
-            if self._notify:
-                self.post_message(
-                    mtype=NotificationType.Plugin,
-                    title="【仅115拦截】阻止PT下载",
-                    text=(
-                        f"{subscribe.name} 的站点设置为仅115网盘，\n"
-                        f"已拦截来自PT的下载：{torrent.title}"
-                    )
-                )
             return
 
         # ── 原有评分拦截（仅 best_version） ──
