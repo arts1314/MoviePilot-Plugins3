@@ -37,13 +37,13 @@ class P115StrgmSub(_PluginBase):
     """115网盘订阅追更插件"""
 
     # 插件名称
-    plugin_name = "115网盘订阅追更魔改版v1.6.95"
+    plugin_name = "115网盘订阅追更魔改版v1.6.96"
     # 插件描述
     plugin_desc = "结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失的电影和剧集。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.95"
+    plugin_version = "1.6.96"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -908,6 +908,7 @@ class P115StrgmSub(_PluginBase):
 
         # 逐集检查
         blocked_any = False
+        existing_before = dict(existing)  # 保存旧评分，用于通知
         for ep in episode_list:
             try:
                 ep_num = int(ep)
@@ -927,19 +928,6 @@ class P115StrgmSub(_PluginBase):
                     f"[下载前拦截] {subscribe.name} {torrent.title} "
                     f"E{ep_num}: 候选{cand_score}分 > 现有{existing_score}分 → 放行"
                 )
-                # PT洗版通知：仅当存在旧文件（已有评分）时才提示升级
-                if self._notify and existing_score > 0:
-                    season_str = season_list[0] if season_list else 1
-                    self.post_message(
-                        mtype=NotificationType.Plugin,
-                        title="【PT洗版】下载升级",
-                        text=(
-                            f"{subscribe.name} S{season_str:02d} E{ep_num:02d}\n"
-                            f"评分 {existing_score}→{cand_score}分\n"
-                            f"种子：{torrent.title}\n"
-                            f"已提交PT下载，入库后自动清理旧文件"
-                        )
-                    )
                 blocked_any = False
                 break  # 只要有一集有提升就不拦整个包
 
@@ -951,6 +939,62 @@ class P115StrgmSub(_PluginBase):
                 f"[下载前拦截] ✅ 已拦截 {subscribe.name} "
                 f"({torrent.title}): {event_data.reason}"
             )
+        else:
+            # ── 放行分支：防重写入 + 通知 ──
+            # 1) 立即写入 episode_priority，防止同 infohash 被多站重复推送
+            updated = False
+            for ep in episode_list:
+                try:
+                    ep_num = int(ep)
+                except (ValueError, TypeError):
+                    continue
+                ep_key = str(ep_num)
+                if cand_score > existing.get(ep_key, 0):
+                    existing[ep_key] = cand_score
+                    updated = True
+            if updated:
+                try:
+                    self._sync_handler._save_ep_priority(subscribe, existing)
+                    logger.info(
+                        f"[下载前拦截] 已写入 episode_priority "
+                        f"{subscribe.name} S{season_list[0]:02d}: {cand_score}分 "
+                        f"共{len(episode_list)}集"
+                    )
+                except Exception as e:
+                    logger.warning(f"[下载前拦截] 写入 episode_priority 失败: {e}")
+
+            # 2) 发送通知（区分新集和升级）
+            if self._notify:
+                season_str = season_list[0] if season_list else 1
+                new_eps = []
+                upgrade_eps = []
+                for ep in episode_list:
+                    try:
+                        ep_num = int(ep)
+                    except (ValueError, TypeError):
+                        continue
+                    old_score = existing_before.get(str(ep_num), 0)
+                    if old_score > 0:
+                        upgrade_eps.append(ep_num)
+                    else:
+                        new_eps.append(ep_num)
+
+                if upgrade_eps or new_eps:
+                    parts = []
+                    if new_eps:
+                        parts.append(f"新集{len(new_eps)}集")
+                    if upgrade_eps:
+                        parts.append(f"升级{len(upgrade_eps)}集")
+                    self.post_message(
+                        mtype=NotificationType.Plugin,
+                        title=f"【PT下载】{' + '.join(parts)}",
+                        text=(
+                            f"{subscribe.name} S{season_str:02d}\n"
+                            f"种子：{torrent.title}\n"
+                            f"评分：{cand_score}分\n"
+                            f"已提交PT下载{'，入库后自动清理旧文件' if upgrade_eps else ''}"
+                        )
+                    )
 
     # ------------------ init_plugin ------------------
 
