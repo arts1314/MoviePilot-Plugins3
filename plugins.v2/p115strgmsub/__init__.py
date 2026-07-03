@@ -3,6 +3,7 @@
 结合MoviePilot订阅功能，自动搜索115网盘资源并转存缺失剧集
 """
 import datetime
+import time
 from pathlib import Path
 from threading import Lock
 from typing import Optional, Any, List, Dict, Tuple
@@ -56,6 +57,9 @@ class P115StrgmSub(_PluginBase):
     # 私有变量
     _scheduler: Optional[BackgroundScheduler] = None
     _toggle_scheduler: Optional[BackgroundScheduler] = None  # 用于延迟切换/窗口切换
+
+    # 重复通知缓存：{种子标题: 时间戳}，6小时内同种子不重复通知
+    _notified_titles: Dict[str, float] = {}
 
     # 配置属性
     _enabled: bool = False
@@ -994,6 +998,17 @@ class P115StrgmSub(_PluginBase):
                         new_eps.append(ep_num)
 
                 if upgrade_eps or new_eps:
+                    # 短期重复通知缓存：6小时内同种子标题不重复通知
+                    now_ts = time.time()
+                    last_ts = self._notified_titles.get(torrent.title, 0)
+                    if now_ts - last_ts < 21600:
+                        logger.info(
+                            f"[下载前拦截] 跳过重复通知：{torrent.title} "
+                            f"({subscribe.name}) 已在6小时内通知过"
+                        )
+                        return
+                    self._notified_titles[torrent.title] = now_ts
+
                     parts = []
                     if new_eps:
                         parts.append(f"新集{len(new_eps)}集")
