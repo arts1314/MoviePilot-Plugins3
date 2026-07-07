@@ -24,6 +24,7 @@ from app.db.models.site import Site
 from app.db.systemconfig_oper import SystemConfigOper
 from app.log import logger
 from app.plugins import _PluginBase
+from app.chain.subscribe import SubscribeChain
 from app.schemas.types import ChainEventType, EventType, MediaType, NotificationType, SystemConfigKey
 
 from .clients import PanSouClient, P115ClientManager, NullbrClient, HDHiveOpenAPIClient, HDHiveOpenAPIError
@@ -44,7 +45,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.98"
+    plugin_version = "1.6.99"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -1852,15 +1853,26 @@ class P115StrgmSub(_PluginBase):
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
         """定义远程控制命令"""
-        return [{
-            "cmd": "/p115_sub_action",
-            "event": EventType.PluginAction,
-            "desc": "115网盘订阅追更",
-            "category": "订阅",
-            "data": {
-                "action": "p115_sub_action"
+        return [
+            {
+                "cmd": "/p115_sub_action",
+                "event": EventType.PluginAction,
+                "desc": "115网盘订阅追更",
+                "category": "订阅",
+                "data": {
+                    "action": "p115_sub_action"
+                }
+            },
+            {
+                "cmd": "/手动执行PT订阅",
+                "event": EventType.PluginAction,
+                "desc": "手动执行PT订阅",
+                "category": "订阅",
+                "data": {
+                    "action": "pt_sub_search"
+                }
             }
-        }]
+        ]
 
 
     def get_service(self) -> List[Dict[str, Any]]:
@@ -2029,6 +2041,17 @@ class P115StrgmSub(_PluginBase):
             logger.info(f"订阅过滤（{mode_label}）：本次跳过 {skipped_count} 个不在处理范围的订阅")
 
         self.save_data('history', history)
+
+        # ⭐ 集数守护：扫描媒体库 strm 文件，同步订阅进度 / 完结通知
+        try:
+            with SessionFactory() as db:
+                all_subs = SubscribeOper(db=db).list() or []
+            completed = self._sync_handler.guardian_check(all_subs)
+            if completed > 0:
+                logger.info(f"[集数守护] 本次完成 {completed} 个订阅")
+        except Exception as e:
+            import traceback
+            logger.error(f"[集数守护] 执行异常: {e}\n{traceback.format_exc()}")
 
         logger.info(f"115 网盘订阅同步完成，共转存 {transferred_count} 个文件")
 
@@ -2622,6 +2645,60 @@ class P115StrgmSub(_PluginBase):
             channel=event_data.get("channel"),
             title="【115网盘订阅追更】执行完成",
             text="远程触发的追更任务已完成。",
+            userid=event_data.get("user")
+        )
+
+    @eventmanager.register(EventType.PluginAction)
+    def remote_pt_search(self, event: Event):
+        if not event:
+            return
+        event_data = event.event_data
+        if not event_data or event_data.get("action") != "pt_sub_search":
+            return
+
+        logger.info("收到命令，开始执行PT订阅搜索")
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            channel=event_data.get("channel"),
+            title="【PT订阅搜索】开始执行",
+            text="已收到远程命令，正在搜索PT订阅...",
+            userid=event_data.get("user")
+        )
+
+        # 屏蔽态时临时恢复站点（守护5分钟内自动回锁到[-1]）
+        backup = self.get_data("subscribe_sites_backup") or {}
+        if backup:
+            logger.info("当前处于屏蔽态，临时恢复订阅站点以执行PT搜索（守护自动回锁）")
+            self._init_subscribe_handler()
+            with SessionFactory() as db:
+                from app.db.subscribe_oper import SubscribeOper
+                oper = SubscribeOper(db=db)
+                for sid_str, site_ids in backup.items():
+                    oper.update(int(sid_str), {"sites": site_ids})
+                for s in oper.list() or []:
+                    if str(s.id) not in backup and not self._is_subscribe_excluded(s.id):
+                        if str(getattr(s, "sites", "[]")) == "[-1]":
+                            oper.update(s.id, {"sites": None})
+            logger.info(f"已恢复 {len(backup)} 个订阅的原始站点")
+
+        try:
+            SubscribeChain().search(state="R")
+        except Exception as e:
+            logger.error(f"PT订阅搜索失败: {e}")
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                channel=event_data.get("channel"),
+                title="【PT订阅搜索】执行失败",
+                text=f"搜索出错：{str(e)}",
+                userid=event_data.get("user")
+            )
+            return
+
+        self.post_message(
+            mtype=NotificationType.Plugin,
+            channel=event_data.get("channel"),
+            title="【PT订阅搜索】执行完成",
+            text="PT订阅搜索已完成。",
             userid=event_data.get("user")
         )
 
