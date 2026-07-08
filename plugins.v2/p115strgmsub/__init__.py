@@ -1864,7 +1864,7 @@ class P115StrgmSub(_PluginBase):
                 }
             },
             {
-                "cmd": "/手动执行PT订阅",
+                "cmd": "/pt_sub_search",
                 "event": EventType.PluginAction,
                 "desc": "手动执行PT订阅",
                 "category": "订阅",
