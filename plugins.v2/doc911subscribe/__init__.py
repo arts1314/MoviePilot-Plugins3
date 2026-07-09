@@ -19,7 +19,7 @@ from app.log import logger
 from app.plugins import _PluginBase
 from app.chain.subscribe import SubscribeChain
 from app.schemas.types import MediaType
-from app.db.subscribe_oper import SubscribeOper
+from app.db.subscribe_oper import Subscribe, SubscribeOper
 from app.db import SessionFactory
 
 
@@ -352,9 +352,9 @@ class Doc911Subscribe(_PluginBase):
         Returns True=已添加/已交给代理, False=跳过(已存在/失败)
         """
         # 检查是否已订阅（按名称匹配）
-        subscribe_oper = SubscribeOper(SessionFactory())
+        db = SessionFactory()
         base_name = show["name"].split(" 第")[0] if " 第" in show["name"] else show["name"]
-        existing = subscribe_oper.list(name=base_name)
+        existing = Subscribe.get_by_title(db, base_name)
         if existing:
             logger.info(
                 f"911文档订阅添加：[{show['name']} ({show['year']})] 已订阅，跳过"
