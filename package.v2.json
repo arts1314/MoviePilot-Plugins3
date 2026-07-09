@@ -30,13 +30,14 @@
   "Doc911Subscribe": {
     "name": "911文档订阅添加",
     "release": true,
-    "description": "每天21:01扫描金山文档，自动添加「本月更新【国产剧】」「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。TMDB识别失败时发送通知提醒。",
+    "description": "每天21:01扫描金山文档，自动添加「本月更新【国产剧】」「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。可配置文档链接，TMDB识别失败时发送通知提醒。",
     "labels": "订阅,文档,KDocs,金山文档,自动订阅,通知",
-    "version": "1.0.0",
+    "version": "1.0.01",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/chain.png",
     "author": "jinyuhao-886",
     "level": 1,
     "history": {
+      "v1.0.01": "新增文档链接配置项：用doc_url替换file_id，用户可直接填入金山文档分享链接，支持未来更换文档",
       "v1.0.0": "1. 识别失败发送通知提醒（⚠️新增订阅未能识别）；2. 移除AI辅助订阅调用；3. 版本号体系重置为1.0.00x",
       "v1.2.1": "1. 扩展季数识别：支持第1季(阿拉伯数字)、S01、Season 1格式；2. 有季数时不传year给TMDB，避免首播年份过滤导致搜不到旧剧续集",
       "v1.2.0": "1. 修复季节订阅错误：从剧名提取\"第X季\"传参chain.add(season=X)，避免默认订阅S01",

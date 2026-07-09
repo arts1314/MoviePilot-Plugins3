@@ -31,7 +31,7 @@ class Doc911Subscribe(_PluginBase):
         "「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。"
     )
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/chain.png"
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.01"
     plugin_author = "jinyuhao-886"
     plugin_priority = 10
 
@@ -77,6 +77,7 @@ class Doc911Subscribe(_PluginBase):
         if config:
             self._enabled = config.get("enabled", False)
             self._cookies = config.get("cookies", "")
+            self._doc_url = config.get("doc_url", "https://www.kdocs.cn/l/cgqWkD4v1nHK")
             self._file_id = config.get("file_id", "206871482430")
             self._only_once = config.get("only_once", False)
             # 解析别名映射表
@@ -175,7 +176,7 @@ class Doc911Subscribe(_PluginBase):
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/130.0.0.0 Safari/537.36"
             ),
-            "Referer": "https://www.kdocs.cn/l/cgqWkD4v1nHK",
+            "Referer": self._doc_url,
             "Cookie": self._cookies,
         }
         try:
@@ -655,10 +656,11 @@ class Doc911Subscribe(_PluginBase):
                                     {
                                         "component": "VTextField",
                                         "props": {
-                                            "model": "file_id",
-                                            "label": "文档File ID",
-                                            "placeholder": "206871482430",
-                                            "hint": "通常无需修改。",
+                                            "model": "doc_url",
+                                            "label": "911文档链接",
+                                            "placeholder": "https://www.kdocs.cn/l/cgqWkD4v1nHK",
+                                            "hint": "金山文档的分享链接。更换文档时填入新链接即可，无需手动修改File ID。",
+                                            "clearable": True,
                                         },
                                     }
                                 ],
@@ -682,8 +684,7 @@ class Doc911Subscribe(_PluginBase):
                                                 "• 本月更新【国外剧】\n"
                                                 "• 本月更新【综艺】\n"
                                                 "自动过滤已完结整季包，只订阅在播新剧。\n"
-                                                "如遇命名不匹配TMDB的情况（如「歌手」→「我是歌手」），"
-                                                "插件会自动调用MP智能助手AI代理辅助识别和订阅。"
+                                                "TMDB识别失败的条目会发送通知提醒，不会自动补填。"
                                             ),
                                         },
                                     }
@@ -697,7 +698,7 @@ class Doc911Subscribe(_PluginBase):
             "enabled": False,
             "only_once": False,
             "cookies": "",
-            "file_id": "206871482430",
+            "doc_url": "https://www.kdocs.cn/l/cgqWkD4v1nHK",
         }
     def get_page(self) -> List[dict]:
         """获取插件页面"""
