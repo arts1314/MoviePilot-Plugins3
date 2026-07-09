@@ -104,3 +104,6 @@
 
 - **KDocs 文档源：** 内部共享追剧表
 - **[MoviePilot](https://github.com/jxxghp/MoviePilot)** - 本体项目
+### v1.2.1
+- 🎯 季数识别大升级：支持 `第1季`（阿拉伯数字）、`S01`、`Season 1` 格式
+- 🐛 修复 TMDB 年份过滤问题：有季数的剧不传 year（避免续集搜不到），新剧才传 year 辅助匹配

@@ -31,7 +31,7 @@ class Doc911Subscribe(_PluginBase):
         "「本月更新【国外剧】」「本月更新【综艺】」在播新剧到MP订阅。"
     )
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/chain.png"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "jinyuhao-886"
     plugin_priority = 10
 
@@ -345,15 +345,44 @@ class Doc911Subscribe(_PluginBase):
 
             if name and year and len(year) == 4:
                 result = {"name": name, "year": year, "season": None}
-                # 提取季数：如 "龙之家族 第三季" → season=3
-                season_match = re.search(r"第([一二三四五六七八九十百]+)季$", name)
-                if season_match:
-                    cn = season_match.group(1)
-                    season = self._CN_NUMS.get(cn)
-                    if season:
-                        result["season"] = season
-                        # 从名字中去掉" 第X季"
-                        result["name"] = name[:season_match.start()].strip()
+
+                # 提取季数（按优先级依次尝试，匹配后去掉季数描述再返回）
+                season = None
+                season_end = None
+
+                # 1. 第N季（阿拉伯数字）：如 "第1季" "第2季"
+                m = re.search(r"第(\d+)季$", name)
+                if m:
+                    season = int(m.group(1))
+                    season_end = m.start()
+
+                # 2. 第N季（中文数字）：如 "第一季" "第三季" "第十季"
+                if season is None:
+                    m = re.search(r"第([一二三四五六七八九十百]+)季$", name)
+                    if m:
+                        _cn = m.group(1)
+                        season = self._CN_NUMS.get(_cn)
+                        season_end = m.start()
+
+                # 3. S01 / S1 格式：如 "S01" "S2" "S01E01"
+                if season is None:
+                    m = re.search(r"[Ss](\d{1,2})(?:[Ee]\d+)?$", name)
+                    if m:
+                        season = int(m.group(1))
+                        season_end = m.start()
+
+                # 4. Season X 格式：如 "Season 1" "Season 01"
+                if season is None:
+                    m = re.search(r"[Ss]eason\s*(\d{1,2})$", name)
+                    if m:
+                        season = int(m.group(1))
+                        season_end = m.start()
+
+                if season is not None and season_end is not None:
+                    result["season"] = season
+                    # 从名字中去掉季数描述（如 " 第三季" " S01"）
+                    result["name"] = name[:season_end].strip()
+
                 return result
 
         return None
@@ -383,12 +412,15 @@ class Doc911Subscribe(_PluginBase):
             chain = SubscribeChain()
             add_kwargs = dict(
                 title=show["name"],
-                year=show["year"],
                 season=show.get("season"),
                 mtype=MediaType.TV,
                 source="911文档订阅添加",
                 message=True,
             )
+            # 有季数时（如"第三季"）：不传 year，避免 TMDB 按首播年份过滤导致搜不到
+            # 无季数时（新剧）：传 year 辅助 TMDB 更精确匹配
+            if not show.get("season") and show.get("year"):
+                add_kwargs["year"] = show["year"]
             subscribe_id, msg = chain.add(**add_kwargs)
 
             if subscribe_id:
@@ -440,15 +472,10 @@ class Doc911Subscribe(_PluginBase):
             f"剧名：{show['name']}\n"
             f"年份：{show['year']}\n"
             f"类型：{section_label}（电视剧）\n"
-        )
-        if show.get("season"):
-            prompt += f"季数：第{show['season']}季\n"
-        prompt += (
             f"\n"
             f"注意：文档中的剧名可能不是TMDB标准名称，"
             f"请先用 search_media 工具搜索正确的TMDB条目，"
             f"确认后再用 add_subscribe 工具添加订阅。"
-            f"注意正确指定季数。"
             f"如果是综艺节目，请搜索正确的综艺节目名称。"
         )
         
