@@ -6,7 +6,7 @@
     "labels": "订阅,115网盘,洗版,PT洗版,魔改",
     "version": "1.7.1",
     "icon": "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png",
-    "author": "jinyuhao-886",
+    "author": "arts1314",
     "level": 1,
     "history": {
       "v1.7.1": "1. 新增 TG 频道/群搜索源：通过 TG Bot API 从私密群/频道抓取含115分享链接的消息，支持多群监控；2. 新增 TG 自动转发功能：后台线程实时转发私密群消息到目标群，含共享缓冲区机制避免 getUpdates 冲突；3. 新增集数守护 & 日历修复（guardian_check）：自动扫描媒体库 strm 文件同步 note/lack_episode，修复日历显示与进度不一致问题；4. UI 新增 TG 搜索和 TG 自动转发配置面板；5. 替换搜索源：移除 Nullbr，新增 TG 频道搜索源",
