@@ -4,11 +4,13 @@
 """
 import datetime
 import time
+import threading
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Optional, Any, List, Dict, Tuple
 
 import pytz
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -45,7 +47,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.0"
+    plugin_version = "1.8.0"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -109,6 +111,19 @@ class P115StrgmSub(_PluginBase):
     _hdhive_auto_unlock: bool = False
     _hdhive_max_unlock_points: int = 50
     _hdhive_max_points_per_sub: int = 20
+
+    # TG 频道搜索配置
+    _tg_enabled: bool = False
+    _tg_bot_token: str = ""
+    _tg_channel_ids: str = ""
+
+    # TG 自动转发配置
+    _tg_forward_enabled: bool = False
+    _tg_forward_target: str = ""
+    _tg_forwarder_thread = None
+    _tg_forwarder_stop = threading.Event()
+    _tg_shared_buffer = []  # 转发线程缓存的消息，供 TG 搜索读取（避免 getUpdates 冲突）
+    _tg_shared_buffer_lock = Lock()
 
     # 是否屏蔽系统订阅（True=已屏蔽系统订阅，False=已恢复系统订阅）
     _block_system_subscribe: bool = False
@@ -1093,6 +1108,16 @@ class P115StrgmSub(_PluginBase):
             self._hdhive_cookie = config.get("hdhive_cookie", "")
             self._hdhive_auto_refresh = config.get("hdhive_auto_refresh", False)
             self._hdhive_refresh_before = int(config.get("hdhive_refresh_before", 86400) or 86400)
+
+            # TG 频道搜索配置
+            self._tg_enabled = config.get("tg_enabled", False)
+            self._tg_bot_token = config.get("tg_bot_token", "")
+            self._tg_channel_ids = config.get("tg_channel_ids", "")
+
+            # TG 自动转发配置
+            self._tg_forward_enabled = config.get("tg_forward_enabled", False)
+            self._tg_forward_target = config.get("tg_forward_target", "")
+
             self._max_transfer_per_sync = int(config.get("max_transfer_per_sync", 50) or 50)
             self._batch_size = int(config.get("batch_size", 20) or 20)
             self._skip_other_season_dirs = config.get("skip_other_season_dirs", True)
@@ -1168,6 +1193,9 @@ class P115StrgmSub(_PluginBase):
 
         logger.info(f"插件初始化：屏蔽态={self._block_start_time}~{self._block_end_time}, 开放态={self._unblock_start_time}~{self._unblock_end_time}, 洗版={'开启' if self._auto_best_version else '关闭'}, 当前接管态={self._is_blocked}")
 
+        # 启动 TG 私密群转发后台线程
+        self._start_tg_forwarder()
+
         # 立即运行一次
         if self._enabled or self._onlyonce:
             if self._onlyonce:
@@ -1183,6 +1211,151 @@ class P115StrgmSub(_PluginBase):
             if self._onlyonce:
                 self._onlyonce = False
                 self.__update_config()
+
+    def _start_tg_forwarder(self):
+        """启动 TG 私密群消息转发后台线程"""
+        if not self._enabled or not self._tg_forward_enabled or not self._tg_forward_target:
+            logger.info("TG转发未启用或配置不完整，跳过启动")
+            self._tg_forwarder_stop.clear()
+            return
+        if self._tg_forwarder_thread and self._tg_forwarder_thread.is_alive():
+            logger.info("TG转发线程已在运行")
+            return
+
+        self._tg_forwarder_stop.clear()
+        self._tg_forwarder_thread = Thread(
+            target=self._tg_forwarder_loop,
+            daemon=True,
+            name="tg-forwarder"
+        )
+        self._tg_forwarder_thread.start()
+        logger.info(f"TG私密群转发线程已启动，目标群ID: {self._tg_forward_target}")
+
+    def _tg_forwarder_loop(self):
+        """TG 私密群转发后台主循环：长轮询 getUpdates → forwardMessage"""
+        import json as _json
+
+        # 读取配置
+        bot_token = self.get_config().get("tg_bot_token", "")
+        src_ids_str = self.get_config().get("tg_channel_ids", "")
+        target_id = self._tg_forward_target
+
+        if not bot_token or not src_ids_str or not target_id:
+            logger.error("TG转发配置不完整：缺 Bot Token / 来源频道 / 目标群")
+            return
+
+        src_ids = [x.strip() for x in src_ids_str.split(",") if x.strip()]
+        api_base = f"https://api.telegram.org/bot{bot_token}"
+        proxies = {"http": "socks5://192.168.10.112:20170", "https": "socks5://192.168.10.112:20170"}
+        last_offset = 0
+
+        logger.info(f"TG转发线程开始运行，监控 {len(src_ids)} 个来源群/频道 → {target_id}")
+
+        while not self._tg_forwarder_stop.is_set():
+            try:
+                url = f"{api_base}/getUpdates"
+                params = {
+                    "timeout": 10,
+                    "allowed_updates": _json.dumps(["channel_post", "message"]),
+                }
+                if last_offset:
+                    params["offset"] = last_offset
+
+                resp = requests.get(url, params=params, proxies=proxies, timeout=15)
+                if resp.status_code != 200:
+                    logger.warning(f"TG getUpdates 返回 {resp.status_code}")
+                    self._tg_forwarder_stop.wait(5)
+                    continue
+
+                data = resp.json()
+                if not data.get("ok"):
+                    logger.warning(f"TG API 返回 not ok: {data}")
+                    self._tg_forwarder_stop.wait(5)
+                    continue
+
+                updates = data.get("result", [])
+                if updates:
+                    # 缓存所有消息到共享缓冲区（供 TG 搜索使用，避免 getUpdates 冲突）
+                    try:
+                        with self._tg_shared_buffer_lock:
+                            for update in updates:
+                                post = update.get("channel_post") or update.get("message")
+                                if not post:
+                                    continue
+                                chat = post.get("chat", {})
+                                cid = str(chat.get("id", ""))
+                                mid = post.get("message_id")
+                                if cid and mid:
+                                    key = f"{cid}:{mid}"
+                                    # 去重
+                                    if not any(m.get("_key") == key for m in self._tg_shared_buffer):
+                                        entry = {
+                                            "_key": key,
+                                            "chat_id": cid,
+                                            "chat_title": chat.get("title") or chat.get("username") or cid,
+                                            "message_id": mid,
+                                            "text": post.get("text") or "",
+                                            "caption": post.get("caption") or "",
+                                            "caption_entities": post.get("caption_entities") or [],
+                                            "date": post.get("date"),
+                                        }
+                                        self._tg_shared_buffer.append(entry)
+                            # 限制缓存大小，防止内存泄漏
+                            if len(self._tg_shared_buffer) > 500:
+                                self._tg_shared_buffer = self._tg_shared_buffer[-300:]
+                    except Exception:
+                        pass
+
+                for update in updates:
+                    update_id = update.get("update_id", 0)
+                    if update_id >= last_offset:
+                        last_offset = update_id + 1
+
+                    # 判断消息来源
+                    msg = update.get("channel_post") or update.get("message") or {}
+                    chat = msg.get("chat", {})
+                    chat_id = str(chat.get("id", ""))
+
+                    if chat_id not in src_ids:
+                        continue
+
+                    msg_id = msg.get("message_id")
+                    if not msg_id:
+                        continue
+
+                    # 转发到目标群
+                    try:
+                        fwd = requests.post(
+                            f"{api_base}/forwardMessage",
+                            json={
+                                "chat_id": int(target_id),
+                                "from_chat_id": int(chat_id),
+                                "message_id": msg_id,
+                            },
+                            proxies=proxies,
+                            timeout=10,
+                        )
+                        if fwd.status_code == 200:
+                            logger.info(f"TG转发: [{chat_id} #{msg_id}] → {target_id}")
+                        else:
+                            logger.warning(f"TG转发失败 [{chat_id} #{msg_id}]: {fwd.status_code} {fwd.text[:200]}")
+                    except Exception as e:
+                        logger.error(f"TG转发异常 [{chat_id} #{msg_id}]: {e}")
+
+                # 没有更新时短暂等待，避免空转
+                if not updates:
+                    self._tg_forwarder_stop.wait(2)
+
+            except requests.exceptions.Timeout:
+                # 长轮询超时是预期行为，继续下一轮
+                continue
+            except (requests.exceptions.ConnectionError, requests.exceptions.SSLError):
+                # 代理断连/SSL EOF 是预期行为（v2raya 对空闲连接有限制），静默重试
+                self._tg_forwarder_stop.wait(2)
+                continue
+            except Exception as e:
+                logger.error(f"TG转发线程异常: {e}")
+                self._tg_forwarder_stop.wait(5)
 
     def _parse_category_rules(self) -> dict:
         """
@@ -1656,7 +1829,12 @@ class P115StrgmSub(_PluginBase):
             hdhive_cookie=self._hdhive_cookie,
             only_115=self._only_115,
             pansou_channels=self._pansou_channels,
-            search_source_order=self._search_source_order
+            search_source_order=self._search_source_order,
+            tg_enabled=self._tg_enabled,
+            tg_bot_token=self._tg_bot_token,
+            tg_channel_ids=self._tg_channel_ids,
+            tg_shared_buffer=self._tg_shared_buffer,
+            tg_shared_buffer_lock=self._tg_shared_buffer_lock,
         )
         # 设置持久化函数，用于保存订阅的历史积分花费
         self._search_handler.set_data_funcs(self.get_data, self.save_data)
@@ -1747,6 +1925,12 @@ class P115StrgmSub(_PluginBase):
             "hdhive_cookie": self._hdhive_cookie,
             "hdhive_auto_refresh": self._hdhive_auto_refresh,
             "hdhive_refresh_before": self._hdhive_refresh_before,
+            # TG 频道搜索配置
+            "tg_enabled": self._tg_enabled,
+            "tg_bot_token": self._tg_bot_token,
+            "tg_channel_ids": self._tg_channel_ids,
+            "tg_forward_enabled": self._tg_forward_enabled,
+            "tg_forward_target": self._tg_forward_target,
             # 其他配置
             "search_source_order": self._search_source_order,
             "subscribe_filter_mode": self._subscribe_filter_mode,
@@ -1782,6 +1966,17 @@ class P115StrgmSub(_PluginBase):
     # ------------------ stop ------------------
 
     def stop_service(self):
+        """停止服务"""
+        # 停止 TG 转发线程
+        try:
+            self._tg_forwarder_stop.set()
+            if self._tg_forwarder_thread and self._tg_forwarder_thread.is_alive():
+                self._tg_forwarder_thread.join(timeout=5)
+                logger.info("TG转发线程已停止")
+        except Exception:
+            pass
+        self._tg_forwarder_thread = None
+
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -1925,13 +2120,13 @@ class P115StrgmSub(_PluginBase):
 
     def _do_sync(self) -> bool:
         # 至少启用一个搜索源
-        if not self._pansou_enabled and not self._nullbr_enabled and not self._hdhive_enabled:
-            logger.error("搜索源均未启用（PanSou/Nullbr/HDHive），无法执行")
+        if not self._pansou_enabled and not self._hdhive_enabled and not self._tg_enabled:
+            logger.error("搜索源均未启用（PanSou/HDHive/TG），无法执行")
             if self._notify:
                 self.post_message(
                     mtype=NotificationType.Plugin,
                     title="【115网盘订阅追更】配置错误",
-                    text="PanSou、Nullbr、HDHive 均未启用，请至少启用一个搜索源。"
+                    text="PanSou、HDHive、TG 均未启用，请至少启用一个搜索源。"
                 )
             return False
 
@@ -1976,6 +2171,7 @@ class P115StrgmSub(_PluginBase):
         try:
             if self._search_handler:
                 self._search_handler.reset_task_spent_points()
+                self._search_handler.reset_tg_cache()
         except Exception:
             pass
 

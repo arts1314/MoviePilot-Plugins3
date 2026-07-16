@@ -1218,6 +1218,7 @@ class SyncHandler:
 
             new_priority = dict(existing_ep_pri)
             upgrade_downloaded = 0
+            upgrade_episodes = set()  # 记录已升级的集号，用于更新 note
             upgrade_notices = []  # 用于通知
 
             for source_index, source in enumerate(enabled_sources):
@@ -1353,6 +1354,7 @@ class SyncHandler:
                         if success:
                             transferred_count += 1
                             upgrade_downloaded += 1
+                            upgrade_episodes.add(episode)
                             candidate_size = item.get("candidate_size", 0)
                             new_priority[str(episode)] = new_score
 
@@ -1403,7 +1405,24 @@ class SyncHandler:
                                 f" {old_score}→{new_score}（{file_name}）"
                             )
 
-            # ---- 6. 更新 episode_priority ----
+            # ---- 6. 更新 note（日历修复：洗版转存的集也记入已入库） ----
+            if upgrade_episodes:
+                try:
+                    current_note = subscribe.note or []
+                    new_note = sorted(set(current_note).union(upgrade_episodes))
+                    update_note = {"note": new_note}
+                    # 同时更新 lack_episode
+                    if subscribe.total_episode and subscribe.total_episode > 0:
+                        start_ep = subscribe.start_episode or 1
+                        expected = set(range(start_ep, subscribe.total_episode + 1))
+                        remaining = expected - set(new_note)
+                        update_note["lack_episode"] = len(remaining)
+                    SubscribeOper().update(subscribe.id, update_note)
+                    logger.info(f"{upgrade_log_prefix} 已更新 note（{len(upgrade_episodes)} 集）→ {new_note}")
+                except Exception as e:
+                    logger.warning(f"{upgrade_log_prefix} 更新 note 失败: {e}")
+
+            # ---- 7. 更新 episode_priority ----
             if new_priority != existing_ep_pri:
                 try:
                     SubscribeOper().update(subscribe.id, {"episode_priority": new_priority})
@@ -2015,3 +2034,159 @@ class SyncHandler:
             title=f"【115网盘订阅追更】转存完成",
             text=f"本次共转存 {total_count} 个文件\n\n" + "\n".join(text_lines)
         )
+
+    # ==================== 集数守护 & 日历修复 ====================
+
+    def guardian_check(self, all_subs) -> int:
+        """
+        集数守护 & 日历修复：扫描媒体库 strm 文件，同步订阅 note/lack_episode。
+
+        修复场景：
+        - PT bypass、115直搜、洗版模式等非标准路径下载后 note 未更新
+        - 日历显示"未入库"但文件实际已在媒体库中
+        - 订阅进度与实际文件不一致
+
+        :param all_subs: 所有订阅列表（SubscribeOper().list() 结果）
+        :return: 本次完成的订阅数（新增的 lack_episode=0 的个数）
+        """
+        import re
+        from pathlib import Path
+        from app.db.subscribe_oper import SubscribeOper
+        from app.schemas.types import MediaType
+
+        completed_count = 0
+
+        for subscribe in all_subs:
+            try:
+                # 只处理活跃的电视剧订阅
+                if getattr(subscribe, 'state', None) == 'D':
+                    continue
+                sub_type = getattr(subscribe, 'type', None)
+                if sub_type != MediaType.TV.value:
+                    continue
+
+                season = subscribe.season or 1
+                total_ep = subscribe.total_episode or 0
+                start_ep = subscribe.start_episode or 1
+
+                if total_ep <= 0:
+                    continue
+
+                # ----- 寻找本地 strm 目录 -----
+                show_name = subscribe.name
+                show_year = f" ({subscribe.year})" if subscribe.year else ""
+                tmdbid = getattr(subscribe, 'tmdbid', None)
+                tmdb_str = f" {{tmdbid={tmdbid}}}" if tmdbid else ""
+
+                candidate_bases = []
+                sub_save = getattr(subscribe, 'save_path', None)
+                if sub_save:
+                    candidate_bases.append(sub_save)
+                if self._save_path:
+                    candidate_bases.append(self._save_path)
+                candidate_bases.append("/media/电视剧")
+
+                local_dir = None
+                for base in candidate_bases:
+                    if not base:
+                        continue
+                    test_dir = f"{base}/{subscribe.name}{show_year}{tmdb_str}/Season {season:02d}"
+                    if Path(test_dir).exists():
+                        local_dir = test_dir
+                        break
+
+                if not local_dir:
+                    # 尝试不加 tmdbid 的路径
+                    for base in candidate_bases:
+                        if not base:
+                            continue
+                        test_dir = f"{base}/{subscribe.name}{show_year}/Season {season:02d}"
+                        if Path(test_dir).exists():
+                            local_dir = test_dir
+                            break
+
+                if not local_dir:
+                    continue
+
+                # ----- 扫描 strm 文件，提取已存在的集号 -----
+                strm_files = list(Path(local_dir).glob("*.strm"))
+                if not strm_files:
+                    continue
+
+                found_episodes = set()
+                for sf in strm_files:
+                    fname = sf.name.replace('.strm', '').replace('.mp4', '').replace('.mkv', '')
+                    ep_match = re.search(r'[Ee](\d{2,4})', fname) or re.search(r'第\s*(\d+)\s*集', fname)
+                    if ep_match:
+                        ep_num = int(ep_match.group(1))
+                        if start_ep <= ep_num <= total_ep:
+                            found_episodes.add(ep_num)
+
+                if not found_episodes:
+                    continue
+
+                # ----- 合并 note -----
+                current_note = subscribe.note or []
+                new_note = sorted(set(current_note).union(found_episodes))
+
+                # 计算 lack_episode
+                expected = set(range(start_ep, total_ep + 1))
+                remaining = expected - set(new_note)
+                new_lack = len(remaining)
+
+                # 只在有变化时写入
+                update_data = {}
+                if set(new_note) != set(current_note):
+                    update_data["note"] = new_note
+                current_lack = subscribe.lack_episode or 0
+                if new_lack != current_lack:
+                    update_data["lack_episode"] = new_lack
+
+                if update_data:
+                    SubscribeOper().update(subscribe.id, update_data)
+                    logger.info(
+                        f"[集数守护] {subscribe.name} S{season:02d} "
+                        f"note:{len(current_note)}→{len(new_note)}集 "
+                        f"lack:{current_lack}→{new_lack}/{total_ep}"
+                    )
+
+                # ----- 如果全部完成，自动完结订阅 -----
+                if new_lack == 0 and remaining != expected:  # 至少完成了一些才能完结
+                    self._try_finish_subscribe(subscribe, found_episodes)
+                    completed_count += 1
+
+            except Exception as e:
+                logger.warning(f"[集数守护] 处理 {getattr(subscribe, 'name', '?')} 异常: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+
+        return completed_count
+
+    def _try_finish_subscribe(self, subscribe, found_episodes):
+        """尝试完结订阅（调用 check_and_finish_subscribe）"""
+        try:
+            from app.core.metainfo import MetaInfo
+            meta = MetaInfo(subscribe.name)
+            meta.year = subscribe.year
+            meta.begin_season = subscribe.season or 1
+            from app.schemas.types import MediaType
+            meta.type = MediaType.TV
+
+            mediainfo = self._chain.recognize_media(
+                meta=meta, mtype=MediaType.TV,
+                tmdbid=getattr(subscribe, 'tmdbid', None),
+                doubanid=getattr(subscribe, 'doubanid', None),
+                cache=True
+            )
+            if not mediainfo:
+                logger.warning(f"[集数守护] 无法识别媒体信息，跳过完结 {subscribe.name}")
+                return
+
+            self._subscribe_handler.check_and_finish_subscribe(
+                subscribe=subscribe,
+                mediainfo=mediainfo,
+                success_episodes=list(found_episodes)
+            )
+            logger.info(f"[集数守护] 订阅 {subscribe.name} S{subscribe.season or 1:02d} 已完结")
+        except Exception as e:
+            logger.warning(f"[集数守护] 完结订阅失败 {subscribe.name}: {e}")
