@@ -198,8 +198,7 @@ class UIConfig:
                                                     'label': '搜索源优先级（按选择顺序排序）',
                                                     'items': [
                                                         {'title': 'PanSou (盘搜)', 'value': 'pansou'},
-                                                        {'title': 'HDHive (影巢)', 'value': 'hdhive'},
-                                                        {'title': 'TG 频道/群', 'value': 'tg'}
+                                                        {'title': 'HDHive (影巢)', 'value': 'hdhive'}
                                                     ],
                                                     'multiple': True,
                                                     'chips': True,
@@ -318,54 +317,9 @@ class UIConfig:
                                              'content': [{'component': 'VTextField', 'props': {'model': 'hdhive_max_points_per_sub', 'label': '单订阅解锁预算', 'type': 'number', 'placeholder': '20', 'hint': '处理单个订阅时允许消耗的最大积分'}}]}
                                         ]
                                     },
-                                    # TG 频道/群搜索
-                                    {
-                                        'component': 'VRow',
-                                        'content': [{
-                                            'component': 'VCol',
-                                            'props': {'cols': 12},
-                                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'TG 频道/群搜索：通过 Telegram Bot API 从公开/私密频道或群组中抓取含115分享链接的消息，支持配置多个群同时监控'}}]
-                                        }]
-                                    },
-                                    {
-                                        'component': 'VRow',
-                                        'content': [
-                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
-                                             'content': [{'component': 'VSwitch', 'props': {'model': 'tg_enabled', 'label': '启用 TG 搜索'}}]},
-                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 5},
-                                             'content': [{'component': 'VTextField', 'props': {"clearable": True, 'model': 'tg_bot_token', 'label': 'Bot Token', 'type': 'password', 'placeholder': '123456:ABCdef...', 'hint': '从 @BotFather 获取'}}]},
-                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
-                                             'content': [{'component': 'VTextField', 'props': {"clearable": True, 'model': 'tg_channel_ids', 'label': '群/频道 ID', 'placeholder': '-100123456,-100789012', 'hint': '多个用逗号分隔；留空则监听 Bot 所在所有群'}}]}
-                                        ]
-                                    },
                                 ]}  # end VExpansionPanelText
                             ]  # end VExpansionPanel content
-                        },  # end VExpansionPanel (搜索源)
-                        {
-                            'component': 'VExpansionPanel',
-                            'content': [
-                                {'component': 'VExpansionPanelTitle', 'text': '📨 TG 自动转发'},
-                                {'component': 'VExpansionPanelText', 'content': [
-                                    {
-                                        'component': 'VRow',
-                                        'content': [{
-                                            'component': 'VCol',
-                                            'props': {'cols': 12},
-                                            'content': [{'component': 'VAlert', 'props': {'type': 'info', 'variant': 'tonal', 'text': 'TG 自动转发：将私密群/频道中的消息实时转发到目标群。Bot 必须在来源群/频道为管理员才能读取消息。公开 TG 频道走 PanSou 搜索，无需在此配置。'}}]
-                                        }]
-                                    },
-                                    {
-                                        'component': 'VRow',
-                                        'content': [
-                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 3},
-                                             'content': [{'component': 'VSwitch', 'props': {'model': 'tg_forward_enabled', 'label': '启用自动转发'}}]},
-                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 5},
-                                             'content': [{'component': 'VTextField', 'props': {'model': 'tg_forward_target', 'label': '目标群 ID', 'placeholder': '-1004457138334', 'hint': '消息转发到的目标群组 ID'}}]}
-                                        ]
-                                    },
-                                ]}  # end VExpansionPanelText
-                            ]  # end VExpansionPanel content
-                        }]  # end VExpansionPanels (搜索源 + 转发)
+                        }]  # end VExpansionPanel (搜索源)
                     },  # end VExpansionPanels (搜索源模块)
                     # 风控防护说明
                     {
@@ -828,11 +782,6 @@ class UIConfig:
             "hdhive_cookie": "",
             "hdhive_auto_refresh": True,
             "hdhive_refresh_before": 86400,
-            "tg_enabled": False,
-            "tg_bot_token": "",
-            "tg_channel_ids": "",
-            "tg_forward_enabled": False,
-            "tg_forward_target": "",
             "search_source_order": [],
             "subscribe_filter_mode": "exclude",
             "exclude_subscribes": [],
