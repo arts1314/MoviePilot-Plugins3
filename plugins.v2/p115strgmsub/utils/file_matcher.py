@@ -16,7 +16,8 @@ class SubscribeFilter:
     def __init__(self, quality: str = None, resolution: str = None, effect: str = None,
                  include: str = None, exclude: str = None, filter: str = None,
                  filter_group_rules: List[Dict] = None, strict: bool = True,
-                 framerate: str = None, bit_depth: str = None, vivid_pattern: str = None):
+                 framerate: str = None, bit_depth: str = None, vivid_pattern: str = None,
+                 hq_pattern: str = None):
         """
         初始化过滤条件
 
@@ -31,6 +32,7 @@ class SubscribeFilter:
         :param framerate: 帧率正则，如 r"60fps|120fps"，匹配加 100 分
         :param bit_depth: 比特深度正则，如 r"10bit|12bit"，匹配加 100 分
         :param vivid_pattern: HDR Vivid 加分正则，匹配则在 effect 基础上额外 +50
+        :param hq_pattern: 高码率（HQ）加分正则，匹配额外 +100 分
         """
         self.quality = quality
         self.resolution = resolution
@@ -43,6 +45,7 @@ class SubscribeFilter:
         self.framerate = framerate
         self.bit_depth = bit_depth
         self.vivid_pattern = vivid_pattern
+        self.hq_pattern = hq_pattern
 
     def has_filters(self) -> bool:
         """
@@ -51,7 +54,8 @@ class SubscribeFilter:
         return bool(self.quality or self.resolution or self.effect
                     or self.include or self.exclude or self.filter
                     or self.filter_group_rules
-                    or self.framerate or self.bit_depth or self.vivid_pattern)
+                    or self.framerate or self.bit_depth or self.vivid_pattern
+                    or self.hq_pattern)
 
     def _is_rejected(self, file_name: str) -> Tuple[bool, str]:
         """拒绝型过滤：exclude/filter 命中即拒绝，永远不放行"""
@@ -138,6 +142,16 @@ class SubscribeFilter:
                 logger.info(f"文件 {file_name} 匹配帧率规则: {self.framerate}")
             else:
                 logger.info(f"文件 {file_name} 不匹配帧率规则: {self.framerate}")
+
+        # 检查高码率（HQ）：独立维度，匹配额外 +150 分（高于帧率/色深的 +100，HQ权重更高）
+        if self.hq_pattern:
+            total_rules += 1
+            if re.search(self.hq_pattern, file_name, re.IGNORECASE):
+                score += 150  # 高码率匹配加 150 分
+                matched_count += 1
+                logger.info(f"文件 {file_name} 匹配高码率规则: {self.hq_pattern} → +150")
+            else:
+                logger.info(f"文件 {file_name} 不匹配高码率规则: {self.hq_pattern}")
 
         # 检查比特深度
         if self.bit_depth:

@@ -47,7 +47,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.1"
+    plugin_version = "1.7.2"
     # 插件作者
     plugin_author = "jinyuhao-886"
     # 作者主页
@@ -137,7 +137,7 @@ class P115StrgmSub(_PluginBase):
     _upgrade_subscribe_ids: list = []
     _last_scored_ids_hash: str = ""  # 上次评分过的ids hash值，用于保存配置时防重复触发
     _min_upgrade_tiers: int = 2
-    _upgrade_threshold: int = 25
+    _upgrade_threshold: int = 3
     _enable_cloud_upgrade: bool = False
     _enable_pt_upgrade: bool = False
     _last_pt_upgrade_time: float = 0.0  # 上次PT洗版扫描时间戳（TransferComplete事件防抖）
@@ -147,9 +147,10 @@ class P115StrgmSub(_PluginBase):
     _cloud_movie_local_dir: str = ""  # 本地电影strm根目录（网盘洗版用）
     _cloud_movie_remote_dir: str = ""  # 115网盘电影目录（网盘洗版用）
     # MP自定义规则正则（同时用于网盘洗版评分）
-    _frame_rate_pattern: str = r"60fps|120fps|50fps|60帧|120帧|50帧"
+    _frame_rate_pattern: str = r"60fps|120fps|60帧|120帧|高帧率"
     _bit_rate_pattern: str = r"10bit|12bit|10-bit|12-bit"
     _vivid_pattern: str = r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid"
+    _hq_pattern: str = r"\bHQ\b|高码|高码率|HQB|High.?Bitrate"
     # 自动注册MP过滤规则到系统
     _subscribe_auto_fill: bool = False
     # 新增订阅时自动填充的规则组（内置SubscribeGroup功能）
@@ -948,9 +949,10 @@ class P115StrgmSub(_PluginBase):
             logger.warning(f"[下载前拦截] 评分失败: {e}，放行")
             return
 
-        # 逐集检查
+        # 逐集检查（阈值：候选必须高出现有至少 N 分才放行，默认 3 = 差一档才洗版）
         blocked_any = False
         existing_before = dict(existing)  # 保存旧评分，用于通知
+        threshold = self._upgrade_threshold
         for ep in episode_list:
             try:
                 ep_num = int(ep)
@@ -959,19 +961,19 @@ class P115StrgmSub(_PluginBase):
             ep_key = str(ep_num)
             existing_score = existing.get(ep_key, 0)
 
-            if cand_score <= existing_score:
+            if cand_score - existing_score < threshold:
                 blocked_any = True
                 logger.info(
                     f"[下载前拦截] {subscribe.name} {torrent.title} "
-                    f"E{ep_num}: 候选{cand_score}分 ≤ 现有{existing_score}分 → 拦截"
+                    f"E{ep_num}: 候选{cand_score}分 提升{cand_score - existing_score} < 阈值{threshold} → 拦截"
                 )
             else:
                 logger.info(
                     f"[下载前拦截] {subscribe.name} {torrent.title} "
-                    f"E{ep_num}: 候选{cand_score}分 > 现有{existing_score}分 → 放行"
+                    f"E{ep_num}: 候选{cand_score}分 提升{cand_score - existing_score} ≥ 阈值{threshold} → 放行"
                 )
                 blocked_any = False
-                break  # 只要有一集有提升就不拦整个包
+                break  # 只要有一集达到提升阈值就不拦整个包
 
         if blocked_any:
             event_data.cancel = True
@@ -1056,7 +1058,11 @@ class P115StrgmSub(_PluginBase):
         download_so_file(Path(__file__).parent / "lib")
         self._apply_http_patches()
 
-        if config:
+        # 🛡️ 修复：config 可能为 None/空（新装插件未配置），兜底为空 dict + 关键属性默认值
+        config = config or {}
+        self._is_blocked = False
+
+        if config is not None:
             self._enabled = config.get("enabled", False)
 
             self._cron = (config.get("cron", self._cron) or "").strip()
@@ -1135,7 +1141,10 @@ class P115StrgmSub(_PluginBase):
             self._auto_best_version = bool(config.get("auto_best_version", False))
             self._upgrade_subscribe_ids = config.get("upgrade_subscribe_ids", []) or []
             self._min_upgrade_tiers = int(config.get("min_upgrade_tiers", 2))
-            self._upgrade_threshold = int(config.get("upgrade_threshold", 25))
+            self._upgrade_threshold = int(config.get("upgrade_threshold", 3))
+            # 迁移：旧版综合分尺度（25/15等大值）→ pri_order 尺度（默认3）
+            if self._upgrade_threshold >= 10:
+                self._upgrade_threshold = 3
             self._self_heal_interval = int(config.get("self_heal_interval", 10))
             self._enable_cloud_upgrade = bool(config.get("enable_cloud_upgrade", False))
             self._enable_pt_upgrade = bool(config.get("enable_pt_upgrade", False))
@@ -1162,6 +1171,9 @@ class P115StrgmSub(_PluginBase):
             _vp = config.get("vivid_pattern", None)
             if _vp:
                 self._vivid_pattern = str(_vp)
+            _hqp = config.get("hq_pattern", None)
+            if _hqp:
+                self._hq_pattern = str(_hqp)
             self._auto_register_rules = bool(config.get("auto_register_rules", False))
             self._tv_rule_group_preset = str(config.get("tv_rule_group_preset", "none") or "none")
             self._tv_rule_group_custom = str(config.get("tv_rule_group_custom", "") or "")
@@ -1427,7 +1439,7 @@ class P115StrgmSub(_PluginBase):
             return []
     def _register_filter_rules(self):
         """
-        向MP注册自定义过滤规则（VIVID/10BIT/60FPS扩展），
+        向MP注册自定义过滤规则（VIVID/10BIT/60FPS/HQ扩展），
         让优先级规则组中的 Vivid/10bit/120fps 等规则 ID 能被 MP 正常识别匹配。
         同时根据 preset 设置应用优先级规则组。
         仅在 auto_register_rules=True 时执行。
@@ -1455,8 +1467,14 @@ class P115StrgmSub(_PluginBase):
                 },
                 "60FPS": {
                     "id": "60FPS",
-                    "name": "高帧率（60fps/120fps/50fps）",
+                    "name": "高帧率（60fps/120fps）",
                     "include": self._frame_rate_pattern,
+                    "exclude": "",
+                },
+                "HQ": {
+                    "id": "HQ",
+                    "name": "高码（HQ/高码率）",
+                    "include": self._hq_pattern,
                     "exclude": "",
                 },
             }
@@ -1699,6 +1717,11 @@ class P115StrgmSub(_PluginBase):
 
     def _init_clients(self):
         """初始化客户端"""
+        # 🛡️ 修复：条件赋值兜底（config 为空或功能未启用时，保证属性存在）
+        self._pansou_client = None
+        self._nullbr_client = None
+        self._hdhive_client = None
+        self._p115_manager = None
         proxy = settings.PROXY
         if proxy:
             logger.info(f"使用 MoviePilot PROXY: {proxy}")
@@ -1865,7 +1888,8 @@ class P115StrgmSub(_PluginBase):
             cloud_movie_remote_dir=self._cloud_movie_remote_dir,
             frame_rate_pattern=self._frame_rate_pattern,
             bit_rate_pattern=self._bit_rate_pattern,
-            vivid_pattern=self._vivid_pattern
+            vivid_pattern=self._vivid_pattern,
+            hq_pattern=self._hq_pattern
         )
 
         # 启动时触发一次兜底清理（保存配置即触发，相当于手动开关）
@@ -2681,26 +2705,9 @@ class P115StrgmSub(_PluginBase):
                             rule_score += 10
                         rule_score = min(rule_score, 100)
 
-                    # 综合评分：50%体积 + 50%画质
-                    # 用 SyncHandler._calc_size_score 同款逻辑简化版
-                    size_gb = fsize / (1024**3)
-                    if size_gb >= 5:
-                        size_score = 100
-                    elif size_gb >= 3:
-                        size_score = 80
-                    elif size_gb >= 2:
-                        size_score = 60
-                    elif size_gb >= 1:
-                        size_score = 40
-                    else:
-                        size_score = 20
-
-                    normalized_rule = min(rule_score, 100)
-                    final_score = int(size_score * 0.50 + normalized_rule * 0.50)
-                    final_score = max(final_score, 60)  # 保底60分
-
-                    new_scores[ep_key] = final_score
-                    logger.debug(f"[强制重评分] {sub_name} E{ep_key}: 体积{size_gb:.1f}GB→{size_score}分×50% + 画质{rule_score}分×50% = {final_score}分")
+                    # 统一使用 MP 规则组评分（pri_order），与 MP 原生洗版同尺
+                    new_scores[ep_key] = max(rule_score, 60)  # 保底60分
+                    logger.debug(f"[强制重评分] {sub_name} E{ep_key}: 规则组评分 {rule_score}分")
 
                 if not new_scores:
                     results.append(f"{sub_name}: 未能从转存记录解析到可评分的集")

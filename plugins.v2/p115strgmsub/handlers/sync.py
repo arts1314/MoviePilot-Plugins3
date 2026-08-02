@@ -53,10 +53,11 @@ class SyncHandler:
         cloud_tv_remote_dir: str = "",
         cloud_movie_local_dir: str = "",
         cloud_movie_remote_dir: str = "",
-        frame_rate_pattern: str = r"60fps|120fps",
-        bit_rate_pattern: str = r"TrueHD|DTS-HD|DTS5\.1|ATMOS|LPCM|FLAC",
+        frame_rate_pattern: str = r"60fps|120fps|60帧|120帧|高帧率",
+        bit_rate_pattern: str = r"10bit|12bit|10-bit|12-bit",
         vivid_pattern: str = r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid",
-        upgrade_threshold: int = 25
+        hq_pattern: str = r"\bHQ\b|高码|高码率|HQB|High.?Bitrate",
+        upgrade_threshold: int = 3
     ):
         """
         初始化同步处理器
@@ -109,9 +110,10 @@ class SyncHandler:
         self._cloud_tv_remote_dir = cloud_tv_remote_dir or ""
         self._cloud_movie_local_dir = cloud_movie_local_dir or ""
         self._cloud_movie_remote_dir = cloud_movie_remote_dir or ""
-        self._frame_rate_pattern = frame_rate_pattern or r"60fps|120fps"
+        self._frame_rate_pattern = frame_rate_pattern or r"60fps|120fps|60帧|120帧|高帧率"
         self._bit_depth_pattern = bit_rate_pattern or r"10bit|12bit|10-bit"
         self._vivid_pattern = vivid_pattern or r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid"
+        self._hq_pattern = hq_pattern or r"\bHQ\b|高码|高码率|HQB|High.?Bitrate"
         self._upgrade_threshold = upgrade_threshold
 
         # 延迟删除队列配置
@@ -207,6 +209,7 @@ class SyncHandler:
                 framerate=self._frame_rate_pattern,
                 bit_depth=self._bit_depth_pattern,
                 vivid_pattern=self._vivid_pattern,
+                hq_pattern=self._hq_pattern,
                 strict=not is_best_version
             )
             if subscribe_filter.has_filters():
@@ -588,6 +591,7 @@ class SyncHandler:
                 framerate=self._frame_rate_pattern,
                 bit_depth=self._bit_depth_pattern,
                 vivid_pattern=self._vivid_pattern,
+                hq_pattern=self._hq_pattern,
                 strict=not is_best_version
             )
             if subscribe_filter.has_filters():
@@ -896,45 +900,6 @@ class SyncHandler:
             return 0
 
     @staticmethod
-    def _calc_size_score(existing_size: int, candidate_size: int) -> int:
-        """
-        计算体积得分 (0~100)
-        候选文件比现有文件大多少分
-        """
-        if existing_size <= 0:
-            return 0  # 无现有文件则体积分为0
-        ratio = candidate_size / existing_size
-        if ratio < 0.85:
-            return -50  # 明显变小，淘汰
-        if ratio < 1.0:
-            return 0
-        if ratio < 1.15:
-            return 30
-        if ratio < 1.30:
-            return 60
-        if ratio < 1.50:
-            return 80
-        return 100
-
-    @staticmethod
-    def _calc_total_upgrade_score(
-        rule_score: int,
-        existing_size: int,
-        candidate_size: int,
-    ) -> int:
-        """
-        计算综合洗版评分 (0~100)
-        :param rule_score: MP 规则组评分 (93-100)，来自 _get_mp_rule_score()
-        :param existing_size: 现有文件大小（字节）
-        :param candidate_size: 候选文件大小（字节）
-        权重：体积 50% + 画质 50%
-        """
-        size_score = SyncHandler._calc_size_score(existing_size, candidate_size)
-        normalized_rule = min(rule_score, 100)  # 已在 93-100 范围
-        total = size_score * 0.50 + normalized_rule * 0.50
-        return max(int(total), 0)
-
-    @staticmethod
     def _get_mp_rule_score(filename: str, filesize: int, subscribe, season: int) -> int:
         """
         使用 MP 原生规则组评分，与 PT 选种同源。
@@ -1078,6 +1043,7 @@ class SyncHandler:
                 framerate=self._frame_rate_pattern,
                 bit_depth=self._bit_depth_pattern,
                 vivid_pattern=self._vivid_pattern,
+                hq_pattern=self._hq_pattern,
                 strict=False  # 洗版模式宽松匹配
             )
 
@@ -1125,17 +1091,12 @@ class SyncHandler:
                         continue
                     episode = int(ep_match.group(1))
 
-                    # MP 规则组评分 + 体积评分 = 综合分
+                    # 统一使用 MP 规则组评分（pri_order），与 MP 原生洗版同尺
                     ep_size = self._get_existing_ep_size(subscribe, episode, local_dir)
                     pri_order = self._get_mp_rule_score(fname, ep_size, subscribe, season)
-                    total_score = self._calc_total_upgrade_score(
-                        rule_score=pri_order,
-                        existing_size=ep_size or 1,
-                        candidate_size=ep_size or 1,
-                    )
 
-                    if episode not in local_scores or total_score > local_scores[episode]:
-                        local_scores[episode] = total_score
+                    if episode not in local_scores or pri_order > local_scores[episode]:
+                        local_scores[episode] = pri_order
 
             # 合并 episode_priority 中的历史记录
             for ep_key, ep_val in existing_ep_pri.items():
@@ -1297,13 +1258,9 @@ class SyncHandler:
                         old_score = local_scores.get(episode, 0)
                         existing_size = self._get_existing_ep_size(subscribe, episode, local_dir) if old_score > 0 else 0
 
-                        # 候选文件用 MP 规则组评分 + 体积评分 = 综合分
+                        # 统一使用 MP 规则组评分（pri_order），与 MP 原生洗版同尺
                         cand_pri = self._get_mp_rule_score(file_name, candidate_size, subscribe, season)
-                        new_score = self._calc_total_upgrade_score(
-                            rule_score=cand_pri,
-                            existing_size=existing_size or candidate_size,
-                            candidate_size=candidate_size or existing_size,
-                        )
+                        new_score = cand_pri
 
                         score_gap = new_score - old_score
 
@@ -1330,6 +1287,7 @@ class SyncHandler:
                             "score_gap": score_gap,
                             "file_name": file_name,
                             "candidate_size": candidate_size,
+                            "cand_pri": cand_pri,
                         })
 
                     if not matched_items:
@@ -1356,7 +1314,8 @@ class SyncHandler:
                             upgrade_downloaded += 1
                             upgrade_episodes.add(episode)
                             candidate_size = item.get("candidate_size", 0)
-                            new_priority[str(episode)] = new_score
+                            # 统一写 pri_order（MP规则组评分），与 MP 原生洗版/拦截器同尺
+                            new_priority[str(episode)] = item.get("cand_pri", new_score)
 
                             if episode in episodes_to_search:
                                 episodes_to_search.remove(episode)
@@ -1660,6 +1619,7 @@ class SyncHandler:
             framerate=self._frame_rate_pattern,
             bit_depth=self._bit_depth_pattern,
             vivid_pattern=self._vivid_pattern,
+                hq_pattern=self._hq_pattern,
             strict=False
         )
 
@@ -1720,15 +1680,10 @@ class SyncHandler:
                 continue
             episode = int(ep_match.group(1))
 
-            # MP 规则组评分 + 体积评分 = 综合分
+            # 统一使用 MP 规则组评分（pri_order），与 MP 原生洗版同尺
             ep_size = self._get_existing_ep_size(subscribe, episode, local_dir)
             pri_order = self._get_mp_rule_score(fname, ep_size, subscribe, season)
-            # 综合分：体积×0.50 + 画质×0.50
-            total_score = self._calc_total_upgrade_score(
-                rule_score=pri_order,
-                existing_size=ep_size or 1,
-                candidate_size=ep_size or 1,
-            )
+            total_score = pri_order
 
             ep_key = str(episode)
             episode_groups.setdefault(ep_key, []).append((sf, total_score, fname, ep_size, pri_order))
@@ -1744,8 +1699,7 @@ class SyncHandler:
             tier_threshold = self._upgrade_threshold
 
             if best_score > old_score:
-                # 更新 episode_priority：存 MP 规则组评分（pri_order），用于 PT 选种对齐
-                # best_score 是综合分（含体积），best_pri_order 是纯规则组评分
+                # 更新 episode_priority：统一存 MP 规则组评分（pri_order），与 MP 原生洗版同尺
                 new_priority[ep_key] = max(best_pri_order, int(old_priority.get(ep_key, 0)))
 
                 if old_score > 0:
@@ -1775,6 +1729,11 @@ class SyncHandler:
                     if sf_path.exists():
                         sf_path.unlink()
                         logger.info(f"洗版删除：已删除本地strm {sf_fname}")
+                        # 同步删除对应的整理记录（transferhistory，CD2中文dest），只删被替换的低分
+                        try:
+                            self._delete_transfer_history_by_fname(sf_fname)
+                        except Exception as e:
+                            logger.warning(f"洗版删除：删除整理记录失败 {sf_fname}: {e}")
                         deleted_count += 1
                         ep_num = int(ep_key)
                         quality_hint = sf_fname.split(' - ')[-1] if ' - ' in sf_fname else sf_fname
@@ -1875,12 +1834,85 @@ class SyncHandler:
 
             if self._p115_manager.delete_file(file_id):
                 logger.info(f"洗版删除：已从115回收站删除 {strm_path.name}（file_id={file_id}）")
+                # 同步删除对应的整理记录（transferhistory），只删被替换的低分版本
+                try:
+                    self._delete_transfer_history_by_fileid(file_id)
+                except Exception as e:
+                    logger.warning(f"洗版删除：删除整理记录失败 {strm_path.name}: {e}")
                 return True
             return False
 
         except Exception as e:
             logger.error(f"洗版删除异常 {strm_path.name}: {e}")
             return False
+
+    def _delete_transfer_history_by_fileid(self, file_id) -> bool:
+        """
+        根据115文件ID删除对应的整理记录（transferhistory）。
+
+        洗版删除低分旧文件后，同步清理该文件对应的整理记录。
+        只删被替换掉的低分版本（通过 115 fileid 精确匹配，不受中英文文件名影响）。
+        """
+        try:
+            from app.db import SessionFactory
+            from sqlalchemy import text as sa_text
+            with SessionFactory() as db:
+                result = db.execute(
+                    sa_text(
+                        "DELETE FROM transferhistory "
+                        "WHERE CAST(json_extract(src_fileitem, '$$.fileid') AS TEXT) = :fid "
+                        "OR CAST(json_extract(dest_fileitem, '$$.fileid') AS TEXT) = :fid"
+                    ),
+                    {"fid": str(file_id)}
+                )
+                db.commit()
+                if result.rowcount > 0:
+                    logger.info(f"洗版删除：已清理整理记录 {result.rowcount} 条（file_id={file_id}）")
+                    return True
+                logger.debug(f"洗版删除：transferhistory 无匹配记录（file_id={file_id}）")
+                return False
+        except Exception as e:
+            logger.warning(f"洗版删除：清理整理记录异常（file_id={file_id}）: {e}")
+            return False
+
+    def _delete_transfer_history_by_fname(self, fname: str) -> int:
+        """
+        根据 strm 文件名（不含扩展名）删除对应的整理记录（transferhistory）。
+
+        洗版删除低分旧 strm 成功后调用。strm 文件名与 CD2 整理后的 dest 文件名
+        一致（仅扩展名不同：.strm vs .mp4/.mkv），因此用文件名匹配 CD2 中文 dest；
+        光鸭英文 dest 天然不匹配，不会误删。
+        只删被替换掉的低分版本。
+        """
+        try:
+            base = fname
+            # 去掉 .strm 扩展名（若有）
+            for ext in (".strm", ".mp4", ".mkv", ".ts", ".avi", ".wmv", ".flv", ".mov", ".m2ts"):
+                if base.lower().endswith(ext):
+                    base = base[: -len(ext)]
+                    break
+            if not base:
+                return 0
+            from app.db import SessionFactory
+            from sqlalchemy import text as sa_text
+            with SessionFactory() as db:
+                # 只匹配 CD2 中文整理路径（/115open/...），且 dest 文件名包含 strm 基名
+                result = db.execute(
+                    sa_text(
+                        "DELETE FROM transferhistory "
+                        "WHERE dest LIKE :fn AND dest LIKE '/115open/%'"
+                    ),
+                    {"fn": "%" + base + "%"}
+                )
+                db.commit()
+                if result.rowcount > 0:
+                    logger.info(f"洗版删除：已清理整理记录 {result.rowcount} 条（strm: {fname}）")
+                    return result.rowcount
+                logger.debug(f"洗版删除：transferhistory 无匹配记录（strm: {fname}）")
+                return 0
+        except Exception as e:
+            logger.warning(f"洗版删除：清理整理记录异常（strm: {fname}）: {e}")
+            return 0
 
     def _self_heal_cleanup(self):
         """

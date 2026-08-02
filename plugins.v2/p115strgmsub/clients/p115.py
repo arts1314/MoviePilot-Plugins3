@@ -948,6 +948,30 @@ class P115ClientManager:
         """重置 API 调用计数器"""
         self._api_call_count = 0
 
+    def delete_file(self, file_id: int) -> bool:
+        """删除115文件（移入回收站）
+
+        实测验证：p115client 的 fs_delete 调用 POST /rb/delete，
+        删除后文件会出现在回收站（recyclebin_list 可查），并非永久删除。
+        真正清空回收站的是 recyclebin_clean（/rb/secret_del），切勿误用。
+
+        :param file_id: 文件ID
+        :return: 是否成功
+        """
+        if not self.client:
+            return False
+        try:
+            self.rate_limiter.wait()
+            self._api_call_count += 1
+            resp = self.client.fs_delete(file_id)
+            if resp and resp.get("state"):
+                return True
+            logger.warning(f"删除115文件失败(移入回收站): {resp}")
+            return False
+        except Exception as e:
+            logger.error(f"删除115文件异常: {e}")
+            return False
+
     def find_file_in_dir(self, dir_path: str, filename: str) -> Optional[dict]:
         """在指定115目录下查找文件名匹配的文件
 

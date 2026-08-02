@@ -574,11 +574,17 @@ class UIConfig:
                                             {'component': 'VCol', 'props': {'cols': 12, 'md': 6},
                                              'content': [{'component': 'VSlider', 'props': {
                                                  'model': 'upgrade_threshold', 'label': '最低洗版提升分',
-                                                 'min': 0, 'max': 100, 'step': 5,
+                                                 'min': 0, 'max': 20, 'step': 1,
                                                  'thumb-label': True,
-                                                 'hint': '候选文件总分必须超过现有文件至少N分才触发洗版（50/50评分制）。25≈体积大15%或画质提升1级。越大越保守。',
+                                                 'hint': '候选文件 pri_order 必须超过现有文件至少N分才触发洗版/放行下载（统一MP规则组评分，93-100档）。默认3=差一档才洗版（93→97→100）。越大越保守。',
                                                  'persistent-hint': True
                                              }}]},
+                                        ]
+                                    },
+                                    # 进度自愈
+                                    {
+                                        'component': 'VRow',
+                                        'content': [
                                             {'component': 'VCol', 'props': {'cols': 12, 'md': 6},
                                              'content': [{'component': 'VTextField', 'props': {
                                                  'model': 'self_heal_interval', 'label': '进度自愈间隔（分钟）', 'type': 'number',
@@ -613,7 +619,7 @@ class UIConfig:
                                                 'props': {
                                                     'type': 'info',
                                                     'variant': 'tonal',
-                                                    'text': 'MP过滤规则管理：向MP系统注册VIVID/10BIT/60FPS三条自定义规则，'
+                                                    'text': 'MP过滤规则管理：向MP系统注册VIVID/10BIT/60FPS/HQ四条自定义规则，'
                                                             '让订阅优先级规则组中可以正常使用 Vivid、10bit、60FPS 等规则ID。'
                                                             '同时自动应用下方选择的优先级规则组预设。'
                                                             '保存配置即自动应用，也可在插件页面手动触发。'
@@ -631,7 +637,7 @@ class UIConfig:
                                                 'props': {
                                                     'model': 'auto_register_rules',
                                                     'label': '注册自定义规则+预设规则组到MP',
-                                                    'hint': '开启后，插件向MP注册VIVID/10BIT/60FPS三条自定义规则，并自动应用所选优先级规则组预设。关闭则不动MP原有规则。默认关闭，按需开启。',
+                                                    'hint': '开启后，插件向MP注册VIVID/10BIT/60FPS/HQ四条自定义规则，并自动应用所选优先级规则组预设。关闭则不动MP原有规则。默认关闭，按需开启。',
                                                     'persistent-hint': True
                                                 }
                                             }]
@@ -657,8 +663,15 @@ class UIConfig:
                                             {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
                                              'content': [{'component': 'VTextField', 'props': {
                                                  'model': 'frame_rate_pattern', 'label': '60FPS自定义规则正则',
-                                                 'placeholder': r'60fps|120fps|50fps|60帧|120帧|50帧', 'clearable': True,
+                                                 'placeholder': r'60fps|120fps|60帧|120帧|高帧率', 'clearable': True,
                                                  'hint': 'MP规则ID: 60FPS（覆盖内置规则）。匹配高帧率资源',
+                                                 'persistent-hint': True
+                                             }}]},
+                                            {'component': 'VCol', 'props': {'cols': 12, 'md': 4},
+                                             'content': [{'component': 'VTextField', 'props': {
+                                                 'model': 'hq_pattern', 'label': 'HQ自定义规则正则',
+                                                 'placeholder': r'\bHQ\b|高码|高码率|HQB|High.?Bitrate', 'clearable': True,
+                                                 'hint': 'MP规则ID: HQ。匹配HQ/高码率资源',
                                                  'persistent-hint': True
                                              }}]},
                                         ]
@@ -856,11 +869,12 @@ class UIConfig:
             "cloud_movie_local_dir": "",
             "cloud_movie_remote_dir": "",
             "min_upgrade_tiers": 2,
-            "upgrade_threshold": 25,
+            "upgrade_threshold": 3,
             "self_heal_interval": 10,
-            "frame_rate_pattern": r"60fps|120fps|50fps|60帧|120帧|50帧",
+            "frame_rate_pattern": r"60fps|120fps|60帧|120帧|高帧率",
             "bit_rate_pattern": r"10bit|12bit|10-bit|12-bit",
             "vivid_pattern": r"HDR[._ ]?[Vv]ivid|菁彩影像|HDRVivid",
+            "hq_pattern": r"\bHQ\b|高码|高码率|HQB|High.?Bitrate",
             "auto_register_rules": False,
             "tv_rule_group_preset": "none",
             "tv_rule_group_custom": "",
