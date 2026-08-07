@@ -1719,6 +1719,9 @@ class SyncHandler:
 
             # 删除低分旧文件
             for sf_path, sf_score, sf_fname, sf_size, sf_pri in candidates[1:]:
+                # 同分不删：评分相同=规则组认为无质量差异，不替换（防止随机误删新版）
+                if sf_score >= best_score:
+                    continue
                 # 删115云端（尝试但不要求成功，联动删除daemon兜底）
                 try:
                     self._delete_old_115_file(sf_path, subscribe)
