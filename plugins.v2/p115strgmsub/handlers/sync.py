@@ -461,7 +461,14 @@ class SyncHandler:
             # 获取缺失的集数列表
             season = meta.begin_season or 1
             missing_episodes = []
-            mediakey = mediainfo.tmdb_id or mediainfo.douban_id
+            # 🔧 修复：no_exists 的 key 是 "tmdb:{id}" / "douban:{id}" 这种带前缀的字符串，
+            # 不能直接用裸的 int tmdb_id 去查，否则永远查不到（诊断日志已实测确认此问题）
+            if mediainfo.tmdb_id:
+                mediakey = f"tmdb:{mediainfo.tmdb_id}"
+            elif mediainfo.douban_id:
+                mediakey = f"douban:{mediainfo.douban_id}"
+            else:
+                mediakey = None
 
             if no_exists and mediakey:
                 season_info = no_exists.get(mediakey, {})
@@ -473,11 +480,11 @@ class SyncHandler:
                         missing_episodes = list(range(start_ep, not_exist_info.total_episode + 1))
 
             if not missing_episodes:
-                # 🔍 诊断日志：排查为何算出0缺失集（正式修复前的临时排查手段，确认原因后可删除）
+                # 🔍 诊断日志：确认问题已定位（mediakey 格式不匹配），修复验证通过后可删除
                 logger.warning(
                     f"[诊断] {mediainfo.title_year} S{season} 缺失集数为空 | "
                     f"exist_flag={exist_flag} | totals传入={totals} | "
-                    f"mediakey={mediakey}({type(mediakey).__name__}) | "
+                    f"mediakey={mediakey} | "
                     f"no_exists的keys={list(no_exists.keys()) if no_exists else None} | "
                     f"season_info={season_info if no_exists and mediakey else None} | "
                     f"not_exist_info={not_exist_info if no_exists and mediakey else None}"
