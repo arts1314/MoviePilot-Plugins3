@@ -3,6 +3,7 @@ PanSou 网盘搜索客户端
 用于搜索各类网盘资源
 """
 import re
+import time
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -242,10 +243,25 @@ class PanSouClient:
                     response = requests.post(search_url, json=payload, headers=headers, timeout=30, proxies=self._proxies)
 
             if response.status_code != 200:
-                return {
-                    "error": f"搜索请求失败: HTTP {response.status_code}",
-                    "keyword": keyword
-                }
+                # 🔧 对临时性服务端错误（503/502/504）做一次重试，避免自建 PanSou 因
+                # 强制 refresh=True 抓取耗时/瞬时过载而被单次 503 直接判定"无结果"
+                if response.status_code in (502, 503, 504):
+                    logger.warning(f"PanSou 请求返回 HTTP {response.status_code}（关键词: '{keyword}'），2秒后重试一次")
+                    time.sleep(2)
+                    self._api_call_count += 1
+                    try:
+                        response = requests.post(search_url, json=payload, headers=headers, timeout=120, proxies=self._proxies)
+                    except Exception as retry_e:
+                        return {
+                            "error": f"搜索请求重试失败: {retry_e}",
+                            "keyword": keyword
+                        }
+
+                if response.status_code != 200:
+                    return {
+                        "error": f"搜索请求失败: HTTP {response.status_code}",
+                        "keyword": keyword
+                    }
 
             resp_data = response.json()
 
