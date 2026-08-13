@@ -473,6 +473,15 @@ class SyncHandler:
                         missing_episodes = list(range(start_ep, not_exist_info.total_episode + 1))
 
             if not missing_episodes:
+                # 🔍 诊断日志：排查为何算出0缺失集（正式修复前的临时排查手段，确认原因后可删除）
+                logger.warning(
+                    f"[诊断] {mediainfo.title_year} S{season} 缺失集数为空 | "
+                    f"exist_flag={exist_flag} | totals传入={totals} | "
+                    f"mediakey={mediakey}({type(mediakey).__name__}) | "
+                    f"no_exists的keys={list(no_exists.keys()) if no_exists else None} | "
+                    f"season_info={season_info if no_exists and mediakey else None} | "
+                    f"not_exist_info={not_exist_info if no_exists and mediakey else None}"
+                )
                 logger.info(f"{mediainfo.title_year} S{season} 没有缺失剧集信息")
                 return transferred_count
 
