@@ -426,10 +426,10 @@ class SyncHandler:
                 logger.warn(f"无法识别媒体信息：{subscribe.name}")
                 return transferred_count
 
-            # 构造总集数信息
+            # 构造总集数信息（season 为 None 时按第1季处理，与全文其余 subscribe.season or 1 逻辑保持一致）
             totals = {}
-            if subscribe.season and subscribe.total_episode:
-                totals = {subscribe.season: subscribe.total_episode}
+            if subscribe.total_episode:
+                totals = {(subscribe.season or 1): subscribe.total_episode}
 
             # 获取缺失剧集
             downloadchain = DownloadChain()
