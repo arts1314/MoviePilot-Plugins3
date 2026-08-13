@@ -221,6 +221,20 @@ class SearchHandler:
             limit=20
         )
 
+        # 🔍 诊断：把 error 打出来，避免请求真实失败（超时/鉴权/HTTP错误/PanSou返回非0 code等）
+        # 被静默当成"无结果"处理，导致明明有资源却查不到还查不出原因
+        if not search_results:
+            logger.warning(f"PanSou 搜索返回空对象（关键词: '{keyword}'）")
+        elif search_results.get("error"):
+            logger.warning(f"PanSou 搜索出错（关键词: '{keyword}'）: {search_results.get('error')}")
+        else:
+            logger.info(
+                f"PanSou 搜索成功（关键词: '{keyword}'）: "
+                f"服务端total={search_results.get('total')}, "
+                f"过滤后count={search_results.get('count')}, "
+                f"results分组keys={list(search_results.get('results', {}).keys())}"
+            )
+
         results = search_results.get("results", {}) if search_results and not search_results.get("error") else {}
         return results.get("115网盘", [])
 
