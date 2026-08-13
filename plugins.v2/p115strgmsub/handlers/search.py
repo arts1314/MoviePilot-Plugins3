@@ -3,6 +3,7 @@
 负责所有搜索相关逻辑：HDHive、Nullbr、PanSou、TG频道
 """
 import os
+import time
 from typing import Optional, List, Dict, Any
 
 from app.core.config import settings
@@ -280,23 +281,25 @@ class SearchHandler:
         mediainfo: MediaInfo,
     ) -> List[Dict]:
         """
-        仅使用 PanSou 搜索电视剧资源（带降级关键词策略）
+        仅使用 PanSou 搜索电影资源（带降级关键词策略）
 
         :param mediainfo: 媒体信息
-        :param season: 季号
         :return: 115网盘资源列表
         """
         if not self._pansou_client:
             logger.warning(f"PanSou 客户端未初始化，跳过 PanSou 查询")
             return []
 
-        # 电视剧使用降级搜索策略
+        # 电影使用降级搜索策略
         search_keywords = [
             f"{mediainfo.title} {mediainfo.year}",
             mediainfo.title
         ]
 
-        for keyword in search_keywords:
+        for idx, keyword in enumerate(search_keywords):
+            if idx > 0:
+                # 🔧 两次强制 refresh 的请求之间加一点延迟，避免连续冲击自建 PanSou 服务导致 503
+                time.sleep(2)
             logger.info(f"使用 PanSou 搜索电影资源: {mediainfo.title}，关键词: '{keyword}'")
             results = self._pansou_search(keyword)
             if results:
@@ -325,12 +328,18 @@ class SearchHandler:
             return []
 
         # 电视剧使用降级搜索策略
+        # 🔧 原来是 f"{title}{season}" 裸拼数字（如"花开锦绣1"），资源标题多写作"第一季/S01"，
+        # 关键词匹配时基本命不中；改为更贴近资源命名习惯的写法
         search_keywords = [
-            f"{mediainfo.title}{season}",  # 中文季号格式
+            f"{mediainfo.title} S{season:02d}",
+            f"{mediainfo.title} 第{season}季",
             mediainfo.title
         ]
 
-        for keyword in search_keywords:
+        for idx, keyword in enumerate(search_keywords):
+            if idx > 0:
+                # 🔧 降级重试之间加延迟，避免连续强制 refresh 冲击 PanSou 服务导致 503
+                time.sleep(2)
             logger.info(f"使用 PanSou 搜索电视剧资源: {mediainfo.title} S{season}，关键词: '{keyword}'")
             results = self._pansou_search(keyword)
             if results:
