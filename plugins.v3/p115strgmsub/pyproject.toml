@@ -3,6 +3,6 @@ name = "moviepilot-plugin-p115strgmsub"
 dynamic = ["version"]
 requires-python = ">=3.12"
 dependencies = [
-    "p115client==0.0.9.6.5.1",
+    "p115client==0.0.9.7.2",
     "playwright-stealth==2.0.2",
 ]
