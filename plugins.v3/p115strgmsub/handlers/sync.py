@@ -71,6 +71,76 @@ class SyncHandler:
         self._get_data = get_data_func
         self._save_data = save_data_func
 
+    def _recognize_media(self, subscribe, meta, mtype):
+        """
+        识别订阅对应的媒体信息，兼容新旧版 MoviePilot：
+        - 新版：recognize_media(media_source=..., media_id=...)，订阅对象自带这两个字段
+        - 旧版：recognize_media(tmdbid=..., doubanid=...)
+        """
+        import inspect
+        func = self._chain.recognize_media
+        try:
+            params = inspect.signature(func).parameters
+        except (TypeError, ValueError):
+            params = {}
+
+        media_id = getattr(subscribe, 'media_id', None)
+        if 'media_source' in params:
+            return func(
+                meta=meta,
+                mtype=mtype,
+                media_source=getattr(subscribe, 'media_source', None),
+                media_id=media_id,
+                cache=True
+            )
+        return func(
+            meta=meta,
+            mtype=mtype,
+            tmdbid=media_id or getattr(subscribe, 'tmdbid', None),
+            doubanid=getattr(subscribe, 'doubanid', None),
+            cache=True
+        )
+
+    @staticmethod
+    def _no_exists_key(mediainfo):
+        """
+        获取 get_no_exists_info 返回字典里的键。
+        新版为带来源前缀的媒体键（如 themoviedb:12345），旧版为 tmdb_id / douban_id。
+        """
+        try:
+            from app.schemas.media import build_media_key, resolve_media_identity
+            media_source, media_id = resolve_media_identity(media=mediainfo)
+            key = build_media_key(media_source, media_id)
+            if key:
+                return key
+        except ImportError:
+            pass
+        return mediainfo.tmdb_id or mediainfo.douban_id
+
+    @staticmethod
+    def _history_identity(mediainfo) -> Dict[str, Any]:
+        """
+        构造写入下载历史的媒体身份字段。
+        新版 DownloadHistory 使用 media_source/media_id，旧版使用 tmdbid/imdbid/tvdbid/doubanid。
+        """
+        try:
+            from app.db.models.downloadhistory import DownloadHistory
+            if hasattr(DownloadHistory, "media_source"):
+                from app.schemas.media import resolve_media_identity
+                media_source, media_id = resolve_media_identity(media=mediainfo)
+                return {
+                    "media_source": str(media_source) if media_source else None,
+                    "media_id": media_id,
+                }
+        except Exception:
+            pass
+        return {
+            "tmdbid": mediainfo.tmdb_id,
+            "imdbid": mediainfo.imdb_id,
+            "tvdbid": mediainfo.tvdb_id,
+            "doubanid": mediainfo.douban_id,
+        }
+
     def process_movie_subscribe(
         self,
         subscribe,
@@ -125,12 +195,10 @@ class SyncHandler:
             meta.type = MediaType.MOVIE
 
             # 识别媒体信息
-            mediainfo: MediaInfo = self._chain.recognize_media(
+            mediainfo: MediaInfo = self._recognize_media(
+                subscribe=subscribe,
                 meta=meta,
-                mtype=MediaType.MOVIE,
-                tmdbid=sub_media_id,
-                doubanid=getattr(subscribe, 'doubanid', None) or getattr(subscribe, 'douban_id', None),
-                cache=True
+                mtype=MediaType.MOVIE
             )
             if not mediainfo:
                 logger.warn(f"无法识别媒体信息：{subscribe.name}")
@@ -269,10 +337,7 @@ class SyncHandler:
                                     type=mediainfo.type.value,
                                     title=mediainfo.title,
                                     year=mediainfo.year,
-                                    tmdbid=mediainfo.tmdb_id,
-                                    imdbid=mediainfo.imdb_id,
-                                    tvdbid=mediainfo.tvdb_id,
-                                    doubanid=mediainfo.douban_id,
+                                    **self._history_identity(mediainfo),
                                     image=mediainfo.get_poster_image(),
                                     downloader="115网盘",
                                     download_hash=matched_file.get("id"),
@@ -348,12 +413,10 @@ class SyncHandler:
             meta.type = MediaType.TV
 
             # 识别媒体信息
-            mediainfo: MediaInfo = self._chain.recognize_media(
+            mediainfo: MediaInfo = self._recognize_media(
+                subscribe=subscribe,
                 meta=meta,
-                mtype=MediaType.TV,
-                tmdbid=sub_media_id,
-                doubanid=getattr(subscribe, 'doubanid', None) or getattr(subscribe, 'douban_id', None),
-                cache=True
+                mtype=MediaType.TV
             )
 
             if not mediainfo:
@@ -395,7 +458,7 @@ class SyncHandler:
             # 获取缺失的集数列表
             season = meta.begin_season or 1
             missing_episodes = []
-            mediakey = mediainfo.tmdb_id or mediainfo.douban_id
+            mediakey = self._no_exists_key(mediainfo)
 
             if no_exists and mediakey:
                 season_info = no_exists.get(mediakey, {})
@@ -738,10 +801,7 @@ class SyncHandler:
                                     type=mediainfo.type.value,
                                     title=mediainfo.title,
                                     year=mediainfo.year,
-                                    tmdbid=mediainfo.tmdb_id,
-                                    imdbid=mediainfo.imdb_id,
-                                    tvdbid=mediainfo.tvdb_id,
-                                    doubanid=mediainfo.douban_id,
+                                    **self._history_identity(mediainfo),
                                     seasons=f"S{season:02d}",
                                     episodes=episodes_str,
                                     image=mediainfo.get_poster_image(),
