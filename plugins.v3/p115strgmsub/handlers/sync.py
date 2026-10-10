@@ -129,7 +129,7 @@ class SyncHandler:
                 meta=meta,
                 mtype=MediaType.MOVIE,
                 tmdbid=sub_media_id,
-                doubanid=subscribe.doubanid,
+                doubanid=getattr(subscribe, 'doubanid', None) or getattr(subscribe, 'douban_id', None),
                 cache=True
             )
             if not mediainfo:
@@ -352,7 +352,7 @@ class SyncHandler:
                 meta=meta,
                 mtype=MediaType.TV,
                 tmdbid=sub_media_id,
-                doubanid=subscribe.doubanid,
+                doubanid=getattr(subscribe, 'doubanid', None) or getattr(subscribe, 'douban_id', None),
                 cache=True
             )
 
