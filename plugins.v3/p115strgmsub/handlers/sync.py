@@ -91,7 +91,8 @@ class SyncHandler:
             logger.info(f"处理电影订阅：{subscribe.name} ({subscribe.year})")
 
             # 加载该订阅的历史积分花费（用 tmdb_id 作为唯一标识）
-            sub_key = f"tmdb_{subscribe.tmdbid}_movie" if subscribe.tmdbid else f"{subscribe.name}_movie"
+            sub_media_id = getattr(subscribe, 'media_id', getattr(subscribe, 'tmdbid', None))
+            sub_key = f"tmdb_{sub_media_id}_movie" if sub_media_id else f"{subscribe.name}_movie"
             if hasattr(self._search_handler, 'reset_sub_spent_points'):
                 self._search_handler.reset_sub_spent_points(sub_key)
 
@@ -127,7 +128,7 @@ class SyncHandler:
             mediainfo: MediaInfo = self._chain.recognize_media(
                 meta=meta,
                 mtype=MediaType.MOVIE,
-                tmdbid=subscribe.tmdbid,
+                tmdbid=sub_media_id,
                 doubanid=subscribe.doubanid,
                 cache=True
             )
@@ -330,7 +331,8 @@ class SyncHandler:
             logger.info(f"处理订阅：{subscribe.name} (S{subscribe.season or 1})")
 
             # 加载该订阅的历史积分花费（用 tmdb_id + 季数作为唯一标识）
-            sub_key = f"tmdb_{subscribe.tmdbid}_S{subscribe.season or 1}" if subscribe.tmdbid else f"{subscribe.name}_S{subscribe.season or 1}"
+            sub_media_id = getattr(subscribe, 'media_id', getattr(subscribe, 'tmdbid', None))
+            sub_key = f"tmdb_{sub_media_id}_S{subscribe.season or 1}" if sub_media_id else f"{subscribe.name}_S{subscribe.season or 1}"
             if hasattr(self._search_handler, 'reset_sub_spent_points'):
                 self._search_handler.reset_sub_spent_points(sub_key)
 
@@ -349,7 +351,7 @@ class SyncHandler:
             mediainfo: MediaInfo = self._chain.recognize_media(
                 meta=meta,
                 mtype=MediaType.TV,
-                tmdbid=subscribe.tmdbid,
+                tmdbid=sub_media_id,
                 doubanid=subscribe.doubanid,
                 cache=True
             )
