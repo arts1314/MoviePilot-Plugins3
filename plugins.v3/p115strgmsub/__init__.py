@@ -39,7 +39,7 @@ class P115StrgmSub(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/jxxghp/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "3.0.6"
+    plugin_version = "3.0.7"
     # 插件作者
     plugin_author = "arts1314"
     # 作者主页
